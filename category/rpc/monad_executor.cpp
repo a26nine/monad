@@ -42,11 +42,10 @@
 #include <category/execution/monad/chain/monad_devnet.hpp>
 #include <category/execution/monad/chain/monad_mainnet.hpp>
 #include <category/execution/monad/chain/monad_testnet.hpp>
-#include <category/execution/monad/chain/monad_testnet2.hpp>
 #include <category/mpt/db_error.hpp>
 #include <category/mpt/ondisk_db_config.hpp>
 #include <category/mpt/util.hpp>
-#include <category/rpc/eth_call.h>
+#include <category/rpc/monad_executor.h>
 #include <category/vm/evm/switch_traits.hpp>
 #include <category/vm/evm/traits.hpp>
 
@@ -141,16 +140,19 @@ namespace
                 auto const balance = intx::be::unsafe::load<uint256_t>(
                     state_delta.balance.value().data());
                 if (balance >
-                    intx::be::load<uint256_t>(state.get_balance(address))) {
+                    intx::be::load<uint256_t>(
+                        state.get_current_balance_pessimistic(address))) {
                     state.add_to_balance(
                         address,
                         balance - intx::be::load<uint256_t>(
-                                      state.get_balance(address)));
+                                      state.get_current_balance_pessimistic(
+                                          address)));
                 }
                 else {
                     state.subtract_from_balance(
                         address,
-                        intx::be::load<uint256_t>(state.get_balance(address)) -
+                        intx::be::load<uint256_t>(
+                            state.get_current_balance_pessimistic(address)) -
                             balance);
                 }
             }
@@ -368,7 +370,7 @@ void set_override_state(
     state_object.emplace(k, std::move(v));
 }
 
-void monad_eth_call_result_release(monad_eth_call_result *const result)
+void monad_executor_result_release(monad_executor_result *const result)
 {
     MONAD_ASSERT(result);
     if (result->output_data) {
@@ -396,7 +398,7 @@ namespace
             high
         };
 
-        Pool(Type const type, monad_eth_call_pool_config const &config)
+        Pool(Type const type, monad_executor_pool_config const &config)
             : type(type)
             , limit(config.queue_limit)
             , timeout(std::chrono::seconds(config.timeout_sec))
@@ -404,9 +406,9 @@ namespace
         {
         }
 
-        monad_eth_call_pool_state get_state() const
+        monad_executor_pool_state get_state() const
         {
-            return monad_eth_call_pool_state{
+            return monad_executor_pool_state{
                 .num_fibers = pool.num_fibers(),
                 .executing_count =
                     executing_count.load(std::memory_order_relaxed),
@@ -450,7 +452,7 @@ namespace
     };
 }
 
-struct monad_eth_call_executor
+struct monad_executor
 {
     using BlockHashCache = LruCache<uint64_t, bytes32_t>;
 
@@ -470,9 +472,9 @@ struct monad_eth_call_executor
 
     BlockHashCache blockhash_cache_{7200};
 
-    monad_eth_call_executor(
-        monad_eth_call_pool_config const &low_pool_config,
-        monad_eth_call_pool_config const &high_pool_config,
+    monad_executor(
+        monad_executor_pool_config const &low_pool_config,
+        monad_executor_pool_config const &high_pool_config,
         uint64_t const node_lru_max_mem, std::string const &triedb_path)
         : low_gas_pool_{Pool::Type::low, low_pool_config}
         , high_gas_pool_{Pool::Type::high, high_pool_config}
@@ -498,9 +500,8 @@ struct monad_eth_call_executor
     {
     }
 
-    monad_eth_call_executor(monad_eth_call_executor const &) = delete;
-    monad_eth_call_executor &
-    operator=(monad_eth_call_executor const &) = delete;
+    monad_executor(monad_executor const &) = delete;
+    monad_executor &operator=(monad_executor const &) = delete;
 
     std::unique_ptr<BlockHashBufferFinalized>
     create_blockhash_buffer(uint64_t const block_number)
@@ -551,10 +552,10 @@ struct monad_eth_call_executor
         BlockHeader const &block_header, Address const &sender,
         uint64_t const block_number, bytes32_t const &block_id,
         monad_state_override const *const overrides,
-        void (*complete)(monad_eth_call_result *, void *user), void *const user,
+        void (*complete)(monad_executor_result *, void *user), void *const user,
         monad_tracer_config const tracer_config, bool const gas_specified)
     {
-        monad_eth_call_result *const result = new monad_eth_call_result();
+        monad_executor_result *const result = new monad_executor_result();
 
         Pool *pool =
             gas_specified && txn.gas_limit > MONAD_ETH_CALL_LOW_GAS_LIMIT
@@ -584,10 +585,10 @@ struct monad_eth_call_executor
         BlockHeader const &block_header, Address const &sender,
         uint64_t const block_number, bytes32_t const &block_id,
         monad_state_override const *const overrides,
-        void (*complete)(monad_eth_call_result *, void *user), void *const user,
+        void (*complete)(monad_executor_result *, void *user), void *const user,
         monad_tracer_config const tracer_config, bool const gas_specified,
         std::chrono::steady_clock::time_point const call_begin,
-        uint64_t const eth_call_seq_no, monad_eth_call_result *const result,
+        uint64_t const eth_call_seq_no, monad_executor_result *const result,
         Pool &active_pool)
     {
         if (!active_pool.try_enqueue()) {
@@ -598,7 +599,8 @@ struct monad_eth_call_executor
             return;
         }
 
-        auto const authorities = recover_authorities({txn}, active_pool.pool);
+        auto const authorities =
+            recover_authorities(std::span{&txn, 1}, active_pool.pool);
         MONAD_ASSERT(authorities.size() == 1);
 
         active_pool.pool.submit(
@@ -663,8 +665,6 @@ struct monad_eth_call_executor
                             return std::make_unique<MonadTestnet>();
                         case CHAIN_CONFIG_MONAD_MAINNET:
                             return std::make_unique<MonadMainnet>();
-                        case CHAIN_CONFIG_MONAD_TESTNET2:
-                            return std::make_unique<MonadTestnet2>();
                         }
                         MONAD_ASSERT(false);
                     }();
@@ -802,8 +802,8 @@ struct monad_eth_call_executor
 
     void call_complete(
         Transaction const &transaction, evmc::Result const &evmc_result,
-        monad_eth_call_result *const result,
-        void (*complete)(monad_eth_call_result *, void *user), void *const user,
+        monad_executor_result *const result,
+        void (*complete)(monad_executor_result *, void *user), void *const user,
         std::vector<CallFrame> const &call_frames,
         nlohmann::json const &state_trace)
     {
@@ -856,10 +856,10 @@ struct monad_eth_call_executor
         BlockHeader const &block_header, Address const &sender,
         uint64_t const block_number, bytes32_t const &block_id,
         monad_state_override const *const overrides,
-        void (*complete)(monad_eth_call_result *, void *user), void *const user,
+        void (*complete)(monad_executor_result *, void *user), void *const user,
         monad_tracer_config const tracer_config,
         std::chrono::steady_clock::time_point const call_begin,
-        auto const eth_call_seq_no, monad_eth_call_result *const result)
+        auto const eth_call_seq_no, monad_executor_result *const result)
     {
         // retry in high gas limit pool
         MONAD_ASSERT(orig_txn.gas_limit > MONAD_ETH_CALL_LOW_GAS_LIMIT);
@@ -883,36 +883,35 @@ struct monad_eth_call_executor
     }
 };
 
-monad_eth_call_executor *monad_eth_call_executor_create(
-    monad_eth_call_pool_config const low_pool_conf,
-    monad_eth_call_pool_config const high_pool_conf,
+monad_executor *monad_executor_create(
+    monad_executor_pool_config const low_pool_conf,
+    monad_executor_pool_config const high_pool_conf,
     uint64_t const node_lru_max_mem, char const *const dbpath)
 {
     MONAD_ASSERT(dbpath);
     std::string const triedb_path{dbpath};
 
-    monad_eth_call_executor *const e = new monad_eth_call_executor(
+    monad_executor *const e = new monad_executor(
         low_pool_conf, high_pool_conf, node_lru_max_mem, triedb_path);
 
     return e;
 }
 
-void monad_eth_call_executor_destroy(monad_eth_call_executor *const e)
+void monad_executor_destroy(monad_executor *const e)
 {
     MONAD_ASSERT(e);
 
     delete e;
 }
 
-void monad_eth_call_executor_submit(
-    monad_eth_call_executor *const executor,
-    monad_chain_config const chain_config, uint8_t const *const rlp_txn,
-    size_t const rlp_txn_len, uint8_t const *const rlp_header,
-    size_t const rlp_header_len, uint8_t const *const rlp_sender,
-    size_t const rlp_sender_len, uint64_t const block_number,
-    uint8_t const *const rlp_block_id, size_t const rlp_block_id_len,
-    monad_state_override const *const overrides,
-    void (*complete)(monad_eth_call_result *result, void *user),
+void monad_executor_eth_call_submit(
+    monad_executor *const executor, monad_chain_config const chain_config,
+    uint8_t const *const rlp_txn, size_t const rlp_txn_len,
+    uint8_t const *const rlp_header, size_t const rlp_header_len,
+    uint8_t const *const rlp_sender, size_t const rlp_sender_len,
+    uint64_t const block_number, uint8_t const *const rlp_block_id,
+    size_t const rlp_block_id_len, monad_state_override const *const overrides,
+    void (*complete)(monad_executor_result *result, void *user),
     void *const user, monad_tracer_config const tracer_config,
     bool const gas_specified)
 {
@@ -959,11 +958,10 @@ void monad_eth_call_executor_submit(
         gas_specified);
 }
 
-struct monad_eth_call_executor_state
-monad_eth_call_executor_get_state(monad_eth_call_executor *const e)
+struct monad_executor_state monad_executor_get_state(monad_executor *const e)
 {
     MONAD_ASSERT(e);
-    return monad_eth_call_executor_state{
+    return monad_executor_state{
         .low_gas_pool_state = e->low_gas_pool_.get_state(),
         .high_gas_pool_state = e->high_gas_pool_.get_state(),
     };

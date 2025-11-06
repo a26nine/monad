@@ -42,7 +42,6 @@
 #include <category/execution/monad/chain/monad_devnet.hpp>
 #include <category/execution/monad/chain/monad_mainnet.hpp>
 #include <category/execution/monad/chain/monad_testnet.hpp>
-#include <category/execution/monad/chain/monad_testnet2.hpp>
 #include <category/mpt/ondisk_db_config.hpp>
 #include <category/statesync/statesync_server.h>
 #include <category/statesync/statesync_server_context.hpp>
@@ -141,8 +140,7 @@ try {
         {{"ethereum_mainnet", CHAIN_CONFIG_ETHEREUM_MAINNET},
          {"monad_devnet", CHAIN_CONFIG_MONAD_DEVNET},
          {"monad_testnet", CHAIN_CONFIG_MONAD_TESTNET},
-         {"monad_mainnet", CHAIN_CONFIG_MONAD_MAINNET},
-         {"monad_testnet2", CHAIN_CONFIG_MONAD_TESTNET2}};
+         {"monad_mainnet", CHAIN_CONFIG_MONAD_MAINNET}};
 
     cli.add_option("--chain", chain_config, "select which chain config to run")
         ->transform(CLI::CheckedTransformer(CHAIN_CONFIG_MAP, CLI::ignore_case))
@@ -299,8 +297,6 @@ try {
             return std::make_unique<MonadTestnet>();
         case CHAIN_CONFIG_MONAD_MAINNET:
             return std::make_unique<MonadMainnet>();
-        case CHAIN_CONFIG_MONAD_TESTNET2:
-            return std::make_unique<MonadTestnet2>();
         }
         MONAD_ASSERT(false);
     }();
@@ -309,7 +305,7 @@ try {
     // Note: in memory db block number is always zero
     uint64_t const init_block_num = [&] {
         if (!snapshot.empty()) {
-            if (db.root().is_valid()) {
+            if (triedb.get_root() != nullptr) {
                 throw std::runtime_error(
                     "can not load checkpoint into non-empty database");
             }
@@ -317,17 +313,16 @@ try {
             std::ifstream accounts(snapshot / "accounts");
             std::ifstream code(snapshot / "code");
             auto const n = std::stoul(snapshot.stem());
-            load_from_binary(db, accounts, code, n);
-
+            auto root = load_from_binary(db, accounts, code, n);
             // load the eth header for snapshot
             BlockDb block_db{block_db_path};
             Block block;
             MONAD_ASSERT_PRINTF(
                 block_db.get(n, block), "FATAL: Could not load block %lu", n);
-            load_header(db, block.header);
-            return n;
+            root = load_header(std::move(root), db, block.header);
+            triedb.reset_root(std::move(root), n);
         }
-        else if (!db.root().is_valid()) {
+        else if (triedb.get_root() == nullptr) {
             MONAD_ASSERT(statesync.empty());
             LOG_INFO("loading from genesis");
             GenesisState const genesis_state = chain->get_genesis_state();
@@ -438,7 +433,6 @@ try {
         case CHAIN_CONFIG_MONAD_DEVNET:
         case CHAIN_CONFIG_MONAD_TESTNET:
         case CHAIN_CONFIG_MONAD_MAINNET:
-        case CHAIN_CONFIG_MONAD_TESTNET2:
             return runloop_monad(
                 dynamic_cast<MonadChain const &>(*chain),
                 block_db_path,

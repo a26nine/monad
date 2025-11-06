@@ -210,6 +210,8 @@ Result<BlockExecOutput> propose_block(
     std::vector<std::vector<CallFrame>> call_frames{block.transactions.size()};
     std::vector<std::unique_ptr<CallTracerBase>> call_tracers{
         block.transactions.size()};
+    std::vector<std::unique_ptr<trace::StateTracer>> state_tracers{
+        block.transactions.size()};
     for (unsigned i = 0; i < block.transactions.size(); ++i) {
         call_tracers[i] =
             enable_tracing
@@ -217,6 +219,8 @@ Result<BlockExecOutput> propose_block(
                       block.transactions[i], call_frames[i])}
                 : std::unique_ptr<CallTracerBase>{
                       std::make_unique<NoopCallTracer>()};
+        state_tracers[i] = std::unique_ptr<trace::StateTracer>{
+            std::make_unique<trace::StateTracer>(std::monostate{})};
     }
 
     MonadChainContext chain_context{
@@ -248,6 +252,8 @@ Result<BlockExecOutput> propose_block(
     db.set_block_and_prefix(
         block.header.number - 1,
         is_first_block ? bytes32_t{} : consensus_header.parent_id());
+    block.header.parent_hash =
+        to_bytes(keccak256(rlp::encode_block_header(db.read_eth_header())));
 
     BlockExecOutput exec_output;
     BlockMetrics block_metrics;
@@ -265,6 +271,7 @@ Result<BlockExecOutput> propose_block(
             priority_pool,
             block_metrics,
             call_tracers,
+            state_tracers,
             [&chain, &block, &chain_context](
                 Address const &sender,
                 Transaction const &tx,
@@ -279,7 +286,6 @@ Result<BlockExecOutput> propose_block(
                     i,
                     state,
                     chain_context);
-                return false;
             }));
     record_block_marker_event(MONAD_EXEC_BLOCK_PERF_EVM_EXIT);
 
@@ -288,7 +294,7 @@ Result<BlockExecOutput> propose_block(
     auto const commit_begin = std::chrono::steady_clock::now();
     block_state.commit(
         block_id,
-        consensus_header.execution_inputs,
+        block.header,
         results,
         call_frames,
         senders,
@@ -298,6 +304,12 @@ Result<BlockExecOutput> propose_block(
     [[maybe_unused]] auto const commit_time =
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - commit_begin);
+    if (commit_time > std::chrono::milliseconds(500)) {
+        LOG_WARNING(
+            "Slow block commit detected - block {}: {}",
+            block.header.number,
+            commit_time);
+    }
 
     // Post-commit validation of header, with Merkle root fields filled in
     exec_output.eth_header = db.read_eth_header();

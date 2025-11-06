@@ -29,7 +29,7 @@ extern "C"
 static uint64_t const MONAD_ETH_CALL_LOW_GAS_LIMIT = 400'000;
 
 struct monad_state_override;
-struct monad_eth_call_executor;
+struct monad_executor;
 
 struct monad_state_override *monad_state_override_create();
 
@@ -60,7 +60,7 @@ void set_override_state(
     uint8_t const *key, size_t key_len, uint8_t const *value,
     size_t valuen_len);
 
-typedef struct monad_eth_call_result
+typedef struct monad_executor_result
 {
     int status_code;
     int64_t gas_used;
@@ -74,11 +74,11 @@ typedef struct monad_eth_call_result
     // for trace (call, prestate, statediff)
     uint8_t *encoded_trace;
     size_t encoded_trace_len;
-} monad_eth_call_result;
+} monad_executor_result;
 
-void monad_eth_call_result_release(monad_eth_call_result *);
+void monad_executor_result_release(monad_executor_result *);
 
-struct monad_eth_call_pool_config
+struct monad_executor_pool_config
 {
     // Number of threads in the pool.
     unsigned num_threads;
@@ -94,7 +94,7 @@ struct monad_eth_call_pool_config
     unsigned queue_limit;
 };
 
-struct monad_eth_call_pool_state
+struct monad_executor_pool_state
 {
     // Number of fibers in the pool.
     unsigned num_fibers;
@@ -112,30 +112,29 @@ struct monad_eth_call_pool_state
     uint64_t queue_full_count;
 };
 
-struct monad_eth_call_executor_state
+struct monad_executor_state
 {
-    struct monad_eth_call_pool_state low_gas_pool_state;
-    struct monad_eth_call_pool_state high_gas_pool_state;
+    struct monad_executor_pool_state low_gas_pool_state;
+    struct monad_executor_pool_state high_gas_pool_state;
 };
 
-struct monad_eth_call_executor *monad_eth_call_executor_create(
-    struct monad_eth_call_pool_config low_pool_conf,
-    struct monad_eth_call_pool_config high_pool_conf, uint64_t node_lru_max_mem,
+struct monad_executor *monad_executor_create(
+    struct monad_executor_pool_config low_pool_conf,
+    struct monad_executor_pool_config high_pool_conf, uint64_t node_lru_max_mem,
     char const *dbpath);
 
-void monad_eth_call_executor_destroy(struct monad_eth_call_executor *);
+void monad_executor_destroy(struct monad_executor *);
 
-void monad_eth_call_executor_submit(
-    struct monad_eth_call_executor *, enum monad_chain_config,
-    uint8_t const *rlp_txn, size_t rlp_txn_len, uint8_t const *rlp_header,
-    size_t rlp_header_len, uint8_t const *rlp_sender, size_t rlp_sender_len,
-    uint64_t block_number, uint8_t const *rlp_block_id, size_t rlp_block_id_len,
+void monad_executor_eth_call_submit(
+    struct monad_executor *, enum monad_chain_config, uint8_t const *rlp_txn,
+    size_t rlp_txn_len, uint8_t const *rlp_header, size_t rlp_header_len,
+    uint8_t const *rlp_sender, size_t rlp_sender_len, uint64_t block_number,
+    uint8_t const *rlp_block_id, size_t rlp_block_id_len,
     struct monad_state_override const *,
-    void (*complete)(monad_eth_call_result *, void *user), void *user,
+    void (*complete)(monad_executor_result *, void *user), void *user,
     enum monad_tracer_config, bool gas_specified);
 
-struct monad_eth_call_executor_state
-monad_eth_call_executor_get_state(struct monad_eth_call_executor *);
+struct monad_executor_state monad_executor_get_state(struct monad_executor *);
 
 #ifdef __cplusplus
 }

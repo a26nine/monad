@@ -44,7 +44,7 @@ namespace detail
         constexpr explicit read_buffer_deleter(AsyncIO *parent)
             : parent_(parent)
         {
-            MONAD_DEBUG_ASSERT(parent != nullptr);
+            MONAD_ASSERT(parent != nullptr);
         }
 
         inline void operator()(std::byte *b);
@@ -60,7 +60,7 @@ namespace detail
         constexpr explicit write_buffer_deleter(AsyncIO *parent)
             : parent_(parent)
         {
-            MONAD_DEBUG_ASSERT(parent != nullptr);
+            MONAD_ASSERT(parent != nullptr);
         }
 
         inline void operator()(std::byte *b);
@@ -115,7 +115,7 @@ public:
     using base_::size_bytes;
     using base_::subspan;
 
-    constexpr filled_read_buffer() {}
+    constexpr filled_read_buffer() = default;
 
     filled_read_buffer(filled_read_buffer const &) = delete;
     filled_read_buffer(filled_read_buffer &&) = default;
@@ -206,7 +206,7 @@ public:
     using base_::size_bytes;
     using base_::subspan;
 
-    constexpr filled_write_buffer() {}
+    constexpr filled_write_buffer() = default;
 
     filled_write_buffer(filled_write_buffer const &) = delete;
     filled_write_buffer(filled_write_buffer &&) = default;
@@ -352,12 +352,12 @@ protected:
         , io_(&io)
     {
 #ifndef __clang__
-        MONAD_DEBUG_ASSERT(&io != nullptr);
+        MONAD_ASSERT(&io != nullptr);
 #endif
     }
 
-    virtual initiation_result do_possibly_deferred_initiate_(
-        bool never_defer, bool is_retry) noexcept = 0;
+    virtual initiation_result
+    do_possibly_deferred_initiate_(bool never_defer, bool is_retry) = 0;
 
 public:
     union
@@ -432,9 +432,8 @@ public:
         static void set_key(node_ptr n, file_offset_t v)
         {
             static constexpr file_offset_t max_key = (1ULL << 63) - 1;
-            MONAD_DEBUG_ASSERT(v <= max_key);
+            MONAD_ASSERT(v <= max_key);
             n->key = v & max_key;
-            MONAD_DEBUG_ASSERT(n->key == v);
         }
 
         static erased_connected_operation *
@@ -481,9 +480,8 @@ public:
         static void set_key(erased_connected_operation *n, file_offset_t v)
         {
             static constexpr file_offset_t max_key = (1ULL << 63) - 1;
-            MONAD_DEBUG_ASSERT(v <= max_key);
+            MONAD_ASSERT(v <= max_key);
             n->rbtree_.key = v & max_key;
-            MONAD_DEBUG_ASSERT(n->rbtree_.key == v);
         }
 
         static node_ptr to_node_ptr(erased_connected_operation *n)
@@ -624,7 +622,7 @@ public:
     //! the receiver
     initiation_result reinitiate() noexcept
     {
-        return do_possibly_deferred_initiate_(true, true);
+        return do_possibly_deferred_initiate_(false, true);
     }
 
     void reset()

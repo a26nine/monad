@@ -83,6 +83,9 @@ AccountState &State::current_account_state(Address const &address)
         auto const &account_state = original_account_state(address);
         it = current_.try_emplace(address, account_state, version_).first;
     }
+    if (!dirty_.empty()) {
+        dirty_.back().emplace(address);
+    }
     return it->second.current(version_);
 }
 
@@ -122,15 +125,26 @@ State::Map<bytes32_t, vm::SharedVarcode> const &State::code() const
 
 void State::push()
 {
+    MONAD_ASSERT(dirty_.size() == version_);
+
     ++version_;
+    dirty_.emplace_back();
 }
 
 void State::pop_accept()
 {
     MONAD_ASSERT(version_);
+    MONAD_ASSERT(dirty_.size() == version_);
 
-    for (auto &it : current_) {
-        it.second.pop_accept(version_);
+    auto accounts = std::move(dirty_.back());
+    dirty_.pop_back();
+    for (auto const &dirty_address : accounts) {
+        auto const it = current_.find(dirty_address);
+        MONAD_ASSERT(it != current_.end());
+        it->second.pop_accept(version_);
+        if (!dirty_.empty()) {
+            dirty_.back().emplace(dirty_address);
+        }
     }
 
     logs_.pop_accept(version_);
@@ -141,12 +155,16 @@ void State::pop_accept()
 void State::pop_reject()
 {
     MONAD_ASSERT(version_);
+    MONAD_ASSERT(dirty_.size() == version_);
 
     std::vector<Address> removals;
-
-    for (auto &it : current_) {
-        if (it.second.pop_reject(version_)) {
-            removals.push_back(it.first);
+    auto accounts = std::move(dirty_.back());
+    dirty_.pop_back();
+    for (auto const &dirty_address : accounts) {
+        auto const it = current_.find(dirty_address);
+        MONAD_ASSERT(it != current_.end());
+        if (it->second.pop_reject(version_)) {
+            removals.push_back(it->first);
         }
     }
 
@@ -199,7 +217,7 @@ uint64_t State::get_nonce(Address const &address)
     return 0;
 }
 
-bytes32_t State::get_balance(Address const &address)
+bytes32_t State::get_current_balance_pessimistic(Address const &address)
 {
     auto const &account = recent_account(address);
     original_account_state(address).set_validate_exact_balance();
@@ -207,6 +225,11 @@ bytes32_t State::get_balance(Address const &address)
         return intx::be::store<bytes32_t>(account.value().balance);
     }
     return {};
+}
+
+bytes32_t State::get_original_balance_pessimistic(Address const &address)
+{
+    return original_account_state(address).get_balance_pessimistic();
 }
 
 bytes32_t State::get_code_hash(Address const &address)
@@ -644,7 +667,44 @@ bool State::try_fix_account_mismatch(
         }
     }
     original->balance = actual->balance;
+
+    // not necessary as can_merge() wont be called
+    // anymore, but just being defensive, and this makes
+    // it easier to write the class invariant
+    original_state.set_validate_exact_balance();
     return true;
+}
+
+bool State::record_balance_constraint_for_debit(
+    Address const &address, uint256_t const &debit)
+{
+    auto const &account = recent_account(address);
+    uint256_t const balance = account.has_value() ? account->balance : 0;
+
+    auto &original_state = original_account_state(address);
+    // RELAXED MERGE
+    // if current balance  >= `debit`, then:
+    // 1. compute the amount that current balance exceeds `debit`
+    // 2. require that the original balance at merge time is at least the
+    // original balance used during this execution less said excess
+    if (balance >= debit) {
+        uint256_t const diff = balance - debit;
+        auto const &original = original_state.account_;
+        uint256_t const original_balance =
+            original.has_value() ? original->balance : 0;
+        if (original_balance > diff) { // avoid underflow when <= diff
+            uint256_t const min_balance =
+                original_balance -
+                diff; // original balance - current balance + debit
+            original_state.set_min_balance(min_balance);
+        }
+        return true;
+    }
+
+    // otherwise require that original balance at merge time matches
+    // original balance used during this execution exactly
+    original_state.set_validate_exact_balance();
+    return false;
 }
 
 MONAD_NAMESPACE_END

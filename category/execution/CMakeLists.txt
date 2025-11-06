@@ -197,9 +197,6 @@ add_library(
   "monad/chain/monad_testnet.cpp"
   "monad/chain/monad_testnet.hpp"
   "monad/chain/monad_testnet_alloc.hpp"
-  "monad/chain/monad_testnet2.cpp"
-  "monad/chain/monad_testnet2.hpp"
-  "monad/chain/monad_testnet2_alloc.hpp"
   # monad/core
   "monad/core/monad_block.hpp"
   "monad/core/monad_ctypes.h"
@@ -232,10 +229,18 @@ add_library(
   "monad/validate_system_transaction.hpp"
   # monad/staking
   "monad/staking/config.hpp"
+  "monad/staking/execute_block_prelude.cpp"
+  "monad/staking/execute_block_prelude.hpp"
+  "monad/staking/fuzzer/staking_contract_machine.cpp"
+  "monad/staking/fuzzer/staking_contract_machine.hpp"
+  "monad/staking/fuzzer/staking_contract_model.cpp"
+  "monad/staking/fuzzer/staking_contract_model.hpp"
   "monad/staking/read_valset.cpp"
   "monad/staking/read_valset.hpp"
   "monad/staking/staking_contract.cpp"
   "monad/staking/staking_contract.hpp"
+  "monad/staking/test/input_generation.cpp"
+  "monad/staking/test/input_generation.hpp"
   "monad/staking/util/bls.cpp"
   "monad/staking/util/bls.hpp"
   "monad/staking/util/consensus_view.cpp"
@@ -304,6 +309,7 @@ target_link_libraries(
   PUBLIC monad_trie
   PUBLIC evmc
   PUBLIC intx::intx
+  PUBLIC magic_enum::magic_enum
   PUBLIC quill::quill)
 monad_compile_options(monad_execution_native)
 
@@ -313,3 +319,14 @@ monad_compile_options(monad_execution_native)
 
 monad_add_test_folder("ethereum")
 monad_add_test_folder("monad")
+
+add_executable(
+    monad_staking_contract_fuzzer
+    "monad/staking/fuzzer/staking_contract_fuzzer.cpp")
+target_include_directories(
+    monad_staking_contract_fuzzer
+    PRIVATE "${CMAKE_BINARY_DIR}/test")
+target_link_libraries(
+    monad_staking_contract_fuzzer
+    PRIVATE monad_execution)
+monad_compile_options(monad_staking_contract_fuzzer)

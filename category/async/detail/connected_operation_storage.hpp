@@ -46,7 +46,7 @@ namespace detail
 
         bool am_within_completions() const noexcept
         {
-            MONAD_DEBUG_ASSERT(within_completions_count >= 0);
+            MONAD_ASSERT(within_completions_count >= 0);
             return within_completions_count > 0;
         }
 
@@ -102,7 +102,7 @@ namespace detail
 
     inline AsyncIO *AsyncIO_thread_instance() noexcept
     {
-        auto &ts = AsyncIO_per_thread_state();
+        auto const &ts = AsyncIO_per_thread_state();
         return ts.instance;
     }
 
@@ -149,15 +149,15 @@ namespace detail
         Sender sender_;
         Receiver receiver_;
 
-        virtual initiation_result do_possibly_deferred_initiate_(
-            bool never_defer, bool is_retry) noexcept override
+        virtual initiation_result
+        do_possibly_deferred_initiate_(bool never_defer, bool is_retry) override
         {
             (void)
                 is_retry; // useful to know how this initiation is coming about
             // You must initiate operations on the same kernel thread as
             // the AsyncIO instance associated with this operation state
             // (except for threadsafeop)
-            MONAD_DEBUG_ASSERT(
+            MONAD_ASSERT(
                 this->executor() == nullptr || this->is_threadsafeop() ||
                 this->executor()->owning_thread_id() == get_tl_tid());
             this->being_executed_ = true;
@@ -385,7 +385,7 @@ namespace detail
         //! If successful do NOT modify anything after
         //! this until after completion, it may cause a silent page
         //! copy-on-write.
-        initiation_result initiate() noexcept
+        initiation_result initiate()
         {
             // NOTE Keep this in sync with the one in
             // erased_connected_operation. This is here to aid devirtualisation.

@@ -48,7 +48,7 @@ namespace detail
     }
 
     using MonadRevisionTypes = decltype(make_monad_revision_types(
-        std::make_index_sequence<MONAD_COUNT>{}));
+        std::make_index_sequence<MONAD_NEXT + 1>{}));
 
     // Skip over EVMC_REVISION which is EVMC_EXPERIMENTAL
     using EvmRevisionTypes = decltype(make_evm_revision_types(
@@ -87,30 +87,44 @@ namespace detail
     };
 }
 
+#define DEFINE_MONAD_TRAITS_FIXTURE(FIXTURE_NAME)                              \
+    TYPED_TEST_SUITE(                                                          \
+        FIXTURE_NAME,                                                          \
+        ::detail::MonadRevisionTypes,                                          \
+        ::detail::RevisionTestNameGenerator)
+
+#define DEFINE_ETHEREUM_TRAITS_FIXTURE(FIXTURE_NAME)                           \
+    TYPED_TEST_SUITE(                                                          \
+        FIXTURE_NAME,                                                          \
+        ::detail::EvmRevisionTypes,                                            \
+        ::detail::RevisionTestNameGenerator)
+
+#define DEFINE_TRAITS_FIXTURE(FIXTURE_NAME)                                    \
+    TYPED_TEST_SUITE(                                                          \
+        FIXTURE_NAME,                                                          \
+        ::detail::MonadEvmRevisionTypes,                                       \
+        ::detail::RevisionTestNameGenerator)
+
 template <typename MonadRevisionT>
-struct MonadRevisionTest : public ::testing::Test
+struct MonadTraitsTest : public ::testing::Test
 {
     static constexpr monad_revision REV = MonadRevisionT::value;
     using Trait = monad::MonadTraits<REV>;
 };
 
-TYPED_TEST_SUITE(
-    MonadRevisionTest, ::detail::MonadRevisionTypes,
-    ::detail::RevisionTestNameGenerator);
+DEFINE_MONAD_TRAITS_FIXTURE(MonadTraitsTest);
 
 template <typename EvmRevisionT>
-struct EvmRevisionTest : public ::testing::Test
+struct EvmTraitsTest : public ::testing::Test
 {
     static constexpr evmc_revision REV = EvmRevisionT::value;
     using Trait = monad::EvmTraits<REV>;
 };
 
-TYPED_TEST_SUITE(
-    EvmRevisionTest, ::detail::EvmRevisionTypes,
-    ::detail::RevisionTestNameGenerator);
+DEFINE_ETHEREUM_TRAITS_FIXTURE(EvmTraitsTest);
 
 template <typename T>
-struct MonadEvmRevisionTest : public ::testing::Test
+struct TraitsTest : public ::testing::Test
 {
     static constexpr auto get_trait()
     {
@@ -123,8 +137,16 @@ struct MonadEvmRevisionTest : public ::testing::Test
     }
 
     using Trait = decltype(get_trait());
+
+    static consteval bool is_monad_trait() noexcept
+    {
+        return monad::is_monad_trait_v<Trait>;
+    }
+
+    static consteval bool is_evm_trait() noexcept
+    {
+        return monad::is_evm_trait_v<Trait>;
+    }
 };
 
-TYPED_TEST_SUITE(
-    MonadEvmRevisionTest, ::detail::MonadEvmRevisionTypes,
-    ::detail::RevisionTestNameGenerator);
+DEFINE_TRAITS_FIXTURE(TraitsTest);

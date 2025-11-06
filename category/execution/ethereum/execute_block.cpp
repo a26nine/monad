@@ -43,6 +43,7 @@
 #include <category/execution/ethereum/trace/call_tracer.hpp>
 #include <category/execution/ethereum/trace/event_trace.hpp>
 #include <category/execution/ethereum/validate_block.hpp>
+#include <category/execution/monad/staking/execute_block_prelude.hpp>
 #include <category/vm/evm/explicit_traits.hpp>
 #include <category/vm/evm/switch_traits.hpp>
 #include <category/vm/evm/traits.hpp>
@@ -79,7 +80,8 @@ void process_withdrawal(
 void transfer_balance_dao(State &state)
 {
     for (auto const &addr : dao::child_accounts) {
-        auto const balance = intx::be::load<uint256_t>(state.get_balance(addr));
+        auto const balance = intx::be::load<uint256_t>(
+            state.get_current_balance_pessimistic(addr));
         state.add_to_balance(dao::withdraw_account, balance);
         state.subtract_from_balance(addr, balance);
     }
@@ -110,7 +112,7 @@ MONAD_ANONYMOUS_NAMESPACE_END
 MONAD_NAMESPACE_BEGIN
 
 std::vector<std::optional<Address>> recover_senders(
-    std::vector<Transaction> const &transactions,
+    std::span<Transaction const> const transactions,
     fiber::PriorityPool &priority_pool)
 {
     std::vector<std::optional<Address>> senders{transactions.size()};
@@ -138,7 +140,7 @@ std::vector<std::optional<Address>> recover_senders(
 }
 
 std::vector<std::vector<std::optional<Address>>> recover_authorities(
-    std::vector<Transaction> const &transactions,
+    std::span<Transaction const> const transactions,
     fiber::PriorityPool &priority_pool)
 {
     std::vector<std::vector<std::optional<Address>>> authorities{
@@ -175,18 +177,53 @@ std::vector<std::vector<std::optional<Address>>> recover_authorities(
 }
 
 template <Traits traits>
+void execute_block_header(
+    Chain const &chain, BlockState &block_state, BlockHeader const &header)
+{
+    State state{block_state, Incarnation{header.number, 0}};
+
+    deploy_block_hash_history_contract<traits>(state);
+    set_block_hash_history<traits>(state, header);
+
+    if constexpr (traits::evm_rev() >= EVMC_CANCUN) {
+        set_beacon_root(state, header);
+    }
+
+    // Ethereum mainnet dao fork
+    if constexpr (traits::evm_rev() == EVMC_HOMESTEAD) {
+        if (MONAD_UNLIKELY(header.number == dao::dao_block_number)) {
+            if (chain.get_chain_id() == 1) {
+                transfer_balance_dao(state);
+            }
+        }
+    }
+
+    // TODO: move to execute_monad_block eventually
+    if constexpr (is_monad_trait_v<traits>) {
+        staking::execute_block_prelude<traits>(state);
+    }
+
+    MONAD_ASSERT(block_state.can_merge(state));
+    block_state.merge(state);
+}
+
+EXPLICIT_TRAITS(execute_block_header);
+
+template <Traits traits>
 Result<std::vector<Receipt>> execute_block_transactions(
     Chain const &chain, BlockHeader const &header,
-    std::vector<Transaction> const &transactions,
-    std::vector<Address> const &senders,
-    std::vector<std::vector<std::optional<Address>>> const &authorities,
+    std::span<Transaction const> const transactions,
+    std::span<Address const> const senders,
+    std::span<std::vector<std::optional<Address>> const> const authorities,
     BlockState &block_state, BlockHashBuffer const &block_hash_buffer,
     fiber::PriorityPool &priority_pool, BlockMetrics &block_metrics,
-    std::vector<std::unique_ptr<CallTracerBase>> &call_tracers,
+    std::span<std::unique_ptr<CallTracerBase>> const call_tracers,
+    std::span<std::unique_ptr<trace::StateTracer>> const state_tracers,
     RevertTransactionFn const &revert_transaction)
 {
     MONAD_ASSERT(senders.size() == transactions.size());
     MONAD_ASSERT(senders.size() == call_tracers.size());
+    MONAD_ASSERT(senders.size() == state_tracers.size());
 
     std::shared_ptr<boost::fibers::promise<void>[]> promises{
         new boost::fibers::promise<void>[transactions.size() + 1]};
@@ -213,6 +250,7 @@ Result<std::vector<Receipt>> execute_block_transactions(
              &block_state,
              &block_metrics,
              &call_tracer = *call_tracers[i],
+             &state_tracer = *state_tracers[i],
              &txn_exec_finished,
              &revert_transaction = revert_transaction] {
                 record_txn_marker_event(MONAD_EXEC_TXN_PERF_EVM_ENTER, i);
@@ -229,6 +267,7 @@ Result<std::vector<Receipt>> execute_block_transactions(
                         block_metrics,
                         promises[i],
                         call_tracer,
+                        state_tracer,
                         revert_transaction);
                     promises[i + 1].set_value();
                     record_txn_marker_event(MONAD_EXEC_TXN_PERF_EVM_EXIT, i);
@@ -290,43 +329,22 @@ EXPLICIT_TRAITS(execute_block_transactions);
 
 template <Traits traits>
 Result<std::vector<Receipt>> execute_block(
-    Chain const &chain, Block const &block, std::vector<Address> const &senders,
-    std::vector<std::vector<std::optional<Address>>> const &authorities,
+    Chain const &chain, Block const &block,
+    std::span<Address const> const senders,
+    std::span<std::vector<std::optional<Address>> const> const authorities,
     BlockState &block_state, BlockHashBuffer const &block_hash_buffer,
     fiber::PriorityPool &priority_pool, BlockMetrics &block_metrics,
-    std::vector<std::unique_ptr<CallTracerBase>> &call_tracers,
+    std::span<std::unique_ptr<CallTracerBase>> const call_tracers,
+    std::span<std::unique_ptr<trace::StateTracer>> const state_tracers,
     RevertTransactionFn const &revert_transaction)
 {
     TRACE_BLOCK_EVENT(StartBlock);
 
     MONAD_ASSERT(senders.size() == block.transactions.size());
     MONAD_ASSERT(senders.size() == call_tracers.size());
+    MONAD_ASSERT(senders.size() == state_tracers.size());
 
-    {
-        State state{block_state, Incarnation{block.header.number, 0}};
-
-        if constexpr (traits::evm_rev() >= EVMC_PRAGUE) {
-            deploy_block_hash_history_contract(state);
-        }
-
-        set_block_hash_history(state, block.header);
-
-        if constexpr (traits::evm_rev() >= EVMC_CANCUN) {
-            set_beacon_root(state, block.header);
-        }
-
-        // Ethereum mainnet dao fork
-        if constexpr (traits::evm_rev() == EVMC_HOMESTEAD) {
-            if (MONAD_UNLIKELY(block.header.number == dao::dao_block_number)) {
-                if (chain.get_chain_id() == 1) {
-                    transfer_balance_dao(state);
-                }
-            }
-        }
-
-        MONAD_ASSERT(block_state.can_merge(state));
-        block_state.merge(state);
-    }
+    execute_block_header<traits>(chain, block_state, block.header);
 
     BOOST_OUTCOME_TRY(
         auto const retvals,
@@ -341,6 +359,7 @@ Result<std::vector<Receipt>> execute_block(
             priority_pool,
             block_metrics,
             call_tracers,
+            state_tracers,
             revert_transaction));
 
     State state{

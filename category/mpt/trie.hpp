@@ -33,7 +33,6 @@
 #include <category/async/io_senders.hpp>
 
 #include <category/core/tl_tid.h>
-#include <category/core/unordered_map.hpp>
 
 #ifdef __clang__
     #pragma clang diagnostic push
@@ -43,6 +42,8 @@
 #ifdef __clang__
     #pragma clang diagnostic pop
 #endif
+
+#include <ankerl/unordered_dense.h>
 
 #include <atomic>
 #include <bit>
@@ -1023,7 +1024,7 @@ void async_read(UpdateAuxImpl &aux, Receiver &&receiver)
 
 // batch upsert, updates can be nested
 Node::SharedPtr upsert(
-    UpdateAuxImpl &, uint64_t, StateMachine &, Node::SharedPtr old,
+    UpdateAuxImpl &, uint64_t version, StateMachine &, Node::SharedPtr old,
     UpdateList &&, bool write_root = true);
 
 // Performs a deep copy of a subtrie from `src_root` trie at
@@ -1032,9 +1033,9 @@ Node::SharedPtr upsert(
 // Any pre-existing trie at `dest_prefix` will be overwritten.
 // The in-memory effect is similar to a move operation.
 Node::SharedPtr copy_trie_to_dest(
-    UpdateAuxImpl &, NodeCursor src_root, NibblesView src_prefix,
-    uint64_t src_version, Node::SharedPtr dest_root, NibblesView dest_prefx,
-    uint64_t const dest_version, bool must_write_to_disk);
+    UpdateAuxImpl &, Node::SharedPtr src_root, NibblesView src_prefix,
+    Node::SharedPtr dest_root, NibblesView dest_prefix, uint64_t dest_version,
+    bool write_root = true);
 
 // load all nodes as far as caching policy would allow
 size_t load_all(UpdateAuxImpl &, StateMachine &, NodeCursor const &);
@@ -1059,13 +1060,13 @@ using find_result_type = std::pair<T, find_result>;
 using find_cursor_result_type = find_result_type<NodeCursor>;
 using find_owning_cursor_result_type = find_result_type<CacheNodeCursor>;
 
-using inflight_map_t = unordered_dense_map<
+using inflight_map_t = ankerl::unordered_dense::segmented_map<
     chunk_offset_t,
     std::vector<
         std::function<MONAD_ASYNC_NAMESPACE::result<void>(NodeCursor const &)>>,
     chunk_offset_t_hasher>;
 
-using inflight_map_owning_t = unordered_dense_map<
+using inflight_map_owning_t = ankerl::unordered_dense::segmented_map<
     virtual_chunk_offset_t,
     std::vector<std::function<MONAD_ASYNC_NAMESPACE::result<void>(
         CacheNodeCursor const &)>>,
@@ -1118,10 +1119,10 @@ find_cursor_result_type find_blocking(
 
 /* This function reads a node from the specified physical offset `node_offset`,
 where the spare bits indicate the number of pages to read. It returns a valid
-`Node::UniquePtr` on success, and returns `nullptr` if the specified version
+`Node::SharedPtr` on success, and returns `nullptr` if the specified version
 becomes invalid.
 */
-Node::UniquePtr read_node_blocking(
+Node::SharedPtr read_node_blocking(
     UpdateAuxImpl const &, chunk_offset_t node_offset, uint64_t version);
 
 //////////////////////////////////////////////////////////////////////////////
