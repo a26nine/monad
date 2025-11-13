@@ -20,6 +20,7 @@
 #include <category/execution/ethereum/chain/chain.hpp>
 #include <category/execution/ethereum/core/block.hpp>
 #include <category/execution/ethereum/core/transaction.hpp>
+#include <category/execution/ethereum/event/record_txn_events.hpp>
 #include <category/execution/ethereum/evm.hpp>
 #include <category/execution/ethereum/evmc_host.hpp>
 #include <category/execution/ethereum/execute_transaction.hpp>
@@ -28,7 +29,7 @@
 #include <category/execution/ethereum/state3/state.hpp>
 #include <category/execution/ethereum/trace/call_tracer.hpp>
 #include <category/execution/ethereum/trace/event_trace.hpp>
-#include <category/execution/ethereum/trace/prestate_tracer.hpp>
+#include <category/execution/ethereum/trace/state_tracer.hpp>
 #include <category/execution/ethereum/transaction_gas.hpp>
 #include <category/execution/ethereum/tx_context.hpp>
 #include <category/execution/ethereum/validate_transaction.hpp>
@@ -296,6 +297,7 @@ ExecuteTransaction<traits>::ExecuteTransaction(
     , call_tracer_{call_tracer}
     , state_tracer_{state_tracer}
 {
+    record_txn_header_events(static_cast<uint32_t>(i), tx, sender, authorities);
 }
 
 template <Traits traits>
@@ -414,8 +416,13 @@ Result<Receipt> ExecuteTransaction<traits>::operator()()
             }
             auto const receipt = execute_final(state, result.value());
             call_tracer_.on_finish(receipt.gas_used);
-            trace::run_tracer(state_tracer_, state);
+            trace::run_tracer<traits>(state_tracer_, state);
             block_state_.merge(state);
+            record_txn_output_events(
+                static_cast<uint32_t>(this->i_),
+                receipt,
+                call_tracer_.get_call_frames(),
+                state);
             return receipt;
         }
     }
@@ -435,8 +442,13 @@ Result<Receipt> ExecuteTransaction<traits>::operator()()
         }
         auto const receipt = execute_final(state, result.value());
         call_tracer_.on_finish(receipt.gas_used);
-        trace::run_tracer(state_tracer_, state);
+        trace::run_tracer<traits>(state_tracer_, state);
         block_state_.merge(state);
+        record_txn_output_events(
+            static_cast<uint32_t>(this->i_),
+            receipt,
+            call_tracer_.get_call_frames(),
+            state);
         return receipt;
     }
 }

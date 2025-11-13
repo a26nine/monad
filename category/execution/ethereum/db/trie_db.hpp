@@ -54,7 +54,7 @@ class TrieDb final : public ::monad::Db
     ::monad::mpt::Node::SharedPtr curr_root_;
 
 public:
-    TrieDb(mpt::Db &);
+    explicit TrieDb(mpt::Db &);
     ~TrieDb();
 
     void reset_root(::monad::mpt::Node::SharedPtr root, uint64_t block_number);
@@ -79,6 +79,8 @@ public:
     finalize(uint64_t block_number, bytes32_t const &block_id) override;
     virtual void update_verified_block(uint64_t block_number) override;
     virtual void update_voted_metadata(
+        uint64_t block_number, bytes32_t const &block_id) override;
+    virtual void update_proposed_metadata(
         uint64_t block_number, bytes32_t const &block_id) override;
 
     virtual BlockHeader read_eth_header() override;

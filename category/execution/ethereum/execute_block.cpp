@@ -205,6 +205,7 @@ void execute_block_header(
 
     MONAD_ASSERT(block_state.can_merge(state));
     block_state.merge(state);
+    record_account_access_events(MONAD_ACCT_ACCESS_BLOCK_PROLOGUE, state);
 }
 
 EXPLICIT_TRAITS(execute_block_header);
@@ -270,14 +271,10 @@ Result<std::vector<Receipt>> execute_block_transactions(
                         state_tracer,
                         revert_transaction);
                     promises[i + 1].set_value();
+                    if (results[i]->has_error()) {
+                        record_txn_error_event(i, results[i]->error());
+                    }
                     record_txn_marker_event(MONAD_EXEC_TXN_PERF_EVM_EXIT, i);
-                    record_txn_events(
-                        i,
-                        transaction,
-                        sender,
-                        authorities,
-                        *results[i],
-                        call_tracer.get_call_frames());
                 }
                 catch (...) {
                     promises[i + 1].set_exception(std::current_exception());
@@ -377,6 +374,7 @@ Result<std::vector<Receipt>> execute_block(
 
     MONAD_ASSERT(block_state.can_merge(state));
     block_state.merge(state);
+    record_account_access_events(MONAD_ACCT_ACCESS_BLOCK_EPILOGUE, state);
 
     return retvals;
 }

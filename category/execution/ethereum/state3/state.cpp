@@ -39,7 +39,7 @@
 
 #include <intx/intx.hpp>
 
-#include <ankerl/unordered_dense.h>
+#include <immer/vector.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -251,21 +251,23 @@ bytes32_t State::get_storage(Address const &address, bytes32_t const &key)
         auto const &account = account_state.account_;
         MONAD_ASSERT(account.has_value());
         auto &storage = account_state.storage_;
-        auto it3 = storage.find(key);
-        if (it3 == storage.end()) {
+        if (auto const *const it3 = storage.find(key); it3) {
+            return *it3;
+        }
+        else {
             bytes32_t const value = block_state_.read_storage(
                 address, account.value().incarnation, key);
-            it3 = storage.try_emplace(key, value).first;
+            storage = storage.insert({key, value});
+            return value;
         }
-        return it3->second;
     }
     else {
         auto const &account_state = it->second.recent();
         auto const &account = account_state.account_;
         MONAD_ASSERT(account.has_value());
         auto const &storage = account_state.storage_;
-        if (auto const it2 = storage.find(key); it2 != storage.end()) {
-            return it2->second;
+        if (auto const *const it2 = storage.find(key); it2) {
+            return *it2;
         }
         auto const it2 = original_.find(address);
         MONAD_ASSERT(it2 != original_.end());
@@ -277,13 +279,15 @@ bytes32_t State::get_storage(Address const &address, bytes32_t const &key)
             return {};
         }
         auto &original_storage = original_account_state.storage_;
-        auto it3 = original_storage.find(key);
-        if (it3 == original_storage.end()) {
+        if (auto const *const it3 = original_storage.find(key); it3) {
+            return *it3;
+        }
+        else {
             bytes32_t const value = block_state_.read_storage(
                 address, account.value().incarnation, key);
-            it3 = original_storage.try_emplace(key, value).first;
+            original_storage = original_storage.insert({key, value});
+            return value;
         }
-        return it3->second;
     }
 }
 
@@ -334,7 +338,7 @@ void State::subtract_from_balance(
         account = Account{.incarnation = incarnation_};
     }
 
-    MONAD_ASSERT(delta <= account.value().balance);
+    MONAD_ASSERT_THROW(delta <= account.value().balance, "balance underflow");
 
     account.value().balance -= delta;
     account_state.touch();
@@ -357,14 +361,16 @@ evmc_storage_status State::set_storage(
     {
         auto &orig_account_state = original_account_state(address);
         auto &storage = orig_account_state.storage_;
-        auto it = storage.find(key);
-        if (it == storage.end()) {
+        if (auto const *const it = storage.find(key); it) {
+            original_value = *it;
+        }
+        else {
             Incarnation const incarnation = account_state.account_->incarnation;
             bytes32_t const value =
                 block_state_.read_storage(address, incarnation, key);
-            it = storage.try_emplace(key, value).first;
+            storage = storage.insert({key, value});
+            original_value = value;
         }
-        original_value = it->second;
     }
     // state
     {
@@ -592,7 +598,7 @@ void State::create_account_no_rollback(Address const &address)
         }};
 }
 
-std::vector<Receipt::Log> const &State::logs()
+immer::vector<Receipt::Log> const &State::logs()
 {
     return logs_.recent();
 }
@@ -600,7 +606,7 @@ std::vector<Receipt::Log> const &State::logs()
 void State::store_log(Receipt::Log const &log)
 {
     auto &logs = logs_.current(version_);
-    logs.push_back(log);
+    logs = logs.push_back(log);
 }
 
 void State::set_to_state_incarnation(Address const &address)

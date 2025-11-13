@@ -136,6 +136,12 @@ add_subdirectory("third_party/cthash")
 set(ETHASH_TESTING NO)
 add_subdirectory("third_party/ethash")
 
+# immer
+option(immer_BUILD_TESTS OFF)
+option(immer_BUILD_EXAMPLES OFF)
+option(immer_BUILD_EXTRAS OFF)
+add_subdirectory("third_party/immer" SYSTEM)
+
 # intx
 add_subdirectory("third_party/intx")
 
@@ -156,7 +162,7 @@ target_include_directories(komihash INTERFACE "third_party/komihash")
 # Because LLVM is a large dependency, we only try to find it if it's
 # explicitly enabled as part of the VM build: regular client builds don't need
 # to use it.
-if(UTILS_CLANG_TIDY_AUTO_CONST_CORRECTNESS OR MONAD_COMPILER_LLVM)
+if(UTILS_CLANG_TIDY_AUTO_CONST OR MONAD_COMPILER_LLVM)
   include(cmake/LinkLLVM.cmake)
   find_package(LLVM 19.1.7 REQUIRED CONFIG)
 endif()
