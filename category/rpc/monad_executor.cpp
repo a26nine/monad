@@ -18,6 +18,8 @@
 #include <category/core/assert.h>
 #include <category/core/byte_string.hpp>
 #include <category/core/bytes.hpp>
+#include <category/core/fiber/fiber_group.hpp>
+#include <category/core/fiber/fiber_thread_pool.hpp>
 #include <category/core/fiber/priority_pool.hpp>
 #include <category/core/int.hpp>
 #include <category/core/keccak.hpp>
@@ -144,7 +146,7 @@ namespace
 
         bytes32_t const &get(uint64_t const n) const override
         {
-            MONAD_ASSERT(n < n_ && n + N >= n_);
+            MONAD_ASSERT_PRINTF(n < n_ && n + N >= n_, "n_=%lu, n=%lu", n_, n);
             if (Cache::ConstAccessor acc; blockhash_cache_.find(acc, n)) {
                 return acc->second->val;
             }
@@ -182,6 +184,62 @@ namespace
     char const *const TRANSACTION_OUT_OF_BOUNDS_ERR_MSG =
         "transaction out of bounds";
     using StateOverrideObj = monad_state_override::monad_state_override_object;
+
+    ankerl::unordered_dense::segmented_set<Address>
+    combine_senders_and_authorities(
+        std::vector<Address> const &senders,
+        std::vector<std::vector<std::optional<Address>>> const &authorities)
+    {
+        ankerl::unordered_dense::segmented_set<Address> senders_and_authorities;
+
+        for (Address const &sender : senders) {
+            senders_and_authorities.insert(sender);
+        }
+
+        for (auto const &authorities_ : authorities) {
+            for (std::optional<Address> const &authority : authorities_) {
+                if (authority.has_value()) {
+                    senders_and_authorities.insert(authority.value());
+                }
+            }
+        }
+
+        return senders_and_authorities;
+    }
+
+    template <Traits traits>
+    auto make_revert_lambda(
+        Chain const &chain, BlockHeader const &header,
+        MonadChainContext const &chain_context)
+    {
+        if constexpr (is_monad_trait_v<traits>) {
+            return [&chain, &header, &chain_context](
+                       Address const &sender,
+                       Transaction const &tx,
+                       uint64_t const i,
+                       State &state) -> bool {
+                // If this cast doesn't succeed, then something has gone
+                // terribly wrong. It will throw an exception which we let
+                // the caller of this simulation / replay handle.
+                return dynamic_cast<MonadChain const &>(chain)
+                    .revert_transaction(
+                        header.number,
+                        header.timestamp,
+                        sender,
+                        tx,
+                        header.base_fee_per_gas.value_or(0),
+                        i,
+                        state,
+                        chain_context);
+            };
+        }
+        else {
+            return [](Address const &,
+                      Transaction const &,
+                      uint64_t const,
+                      State &) -> bool { return false; };
+        }
+    }
 
     template <Traits traits>
     Result<evmc::Result> eth_call_impl(
@@ -295,13 +353,37 @@ namespace
         // will always mark this transaction as coming from an EOA.
         BOOST_OUTCOME_TRY(validate_transaction<traits>(enriched_txn, eoa, {}));
 
+        auto const senders = std::vector{sender};
+        auto const authorities_vec =
+            std::vector<std::vector<std::optional<Address>>>{{authorities}};
+        auto const senders_and_authorities =
+            combine_senders_and_authorities(senders, authorities_vec);
+
+        // Note that the chain context constructed for a simulated transaction
+        // does not consider the parent and grandparent blocks. This means that
+        // every transaction simulated will be allowed to empty an undelegated
+        // sender's balance.
+        auto const chain_context = MonadChainContext{
+            .grandparent_senders_and_authorities = nullptr,
+            .parent_senders_and_authorities = nullptr,
+            .senders_and_authorities = senders_and_authorities,
+            .senders = senders,
+            .authorities = authorities_vec,
+        };
+
         auto const tx_context = get_tx_context<traits>(
             enriched_txn, sender, header, chain.get_chain_id());
 
-        // TODO: properly initialize revert_transaction?
         EvmcHost<traits> host{call_tracer, tx_context, buffer, state};
         auto execution_result = ExecuteTransactionNoValidation<traits>{
-            chain, enriched_txn, sender, authorities, header, 0}(state, host);
+            chain,
+            enriched_txn,
+            sender,
+            authorities,
+            header,
+            0,
+            make_revert_lambda<traits>(chain, header, chain_context),
+        }(state, host);
 
         // compute gas_refund and gas_used
         auto const gas_refund = compute_gas_refund<traits>(
@@ -318,46 +400,29 @@ namespace
         return execution_result;
     }
 
-    ankerl::unordered_dense::segmented_set<Address>
-    combine_senders_and_authorities(
-        std::vector<Address> const &senders,
-        std::vector<std::vector<std::optional<Address>>> const &authorities)
-    {
-        ankerl::unordered_dense::segmented_set<Address> senders_and_authorities;
-
-        for (Address const &sender : senders) {
-            senders_and_authorities.insert(sender);
-        }
-
-        for (auto const &authorities_ : authorities) {
-            for (std::optional<Address> const &authority : authorities_) {
-                if (authority.has_value()) {
-                    senders_and_authorities.insert(authority.value());
-                }
-            }
-        }
-
-        return senders_and_authorities;
-    }
-
     std::pair<
         std::vector<Address>, std::vector<std::vector<std::optional<Address>>>>
     recover_senders_and_authorities(
-        std::vector<Transaction> const &transactions,
-        monad::fiber::PriorityPool &pool)
+        std::vector<Transaction> const &transactions)
     {
         std::vector<Address> senders;
-        {
-            std::vector<std::optional<Address>> const recovered_senders =
-                monad::recover_senders(transactions, pool);
-            for (std::optional<Address> const &sender : recovered_senders) {
-                MONAD_ASSERT_THROW(sender.has_value(), RECOVER_SENDER_ERR_MSG);
-                senders.emplace_back(sender.value());
-            }
+        senders.reserve(transactions.size());
+        for (auto const &txn : transactions) {
+            auto const sender = recover_sender(txn);
+            MONAD_ASSERT_THROW(sender.has_value(), RECOVER_SENDER_ERR_MSG);
+            senders.emplace_back(sender.value());
         }
 
-        std::vector<std::vector<std::optional<Address>>> const authorities =
-            monad::recover_authorities(transactions, pool);
+        std::vector<std::vector<std::optional<Address>>> authorities;
+        authorities.reserve(transactions.size());
+        for (auto const &txn : transactions) {
+            std::vector<std::optional<Address>> txn_authorities;
+            txn_authorities.reserve(txn.authorization_list.size());
+            for (auto const &auth : txn.authorization_list) {
+                txn_authorities.emplace_back(recover_authority(auth));
+            }
+            authorities.emplace_back(std::move(txn_authorities));
+        }
 
         return {std::move(senders), authorities};
     }
@@ -368,45 +433,10 @@ namespace
         BlockHeader const &header, std::vector<Transaction> const &transactions,
         bool const trace_transaction, uint64_t const transaction_index,
         BlockState &block_state, LazyBlockHash const &buffer,
-        monad::fiber::PriorityPool &pool,
-        enum monad_tracer_config tracer_config)
+        fiber::FiberGroup &tx_exec_pool, enum monad_tracer_config tracer_config)
     {
         MONAD_ASSERT(transactions.size() == chain_context.senders.size());
         MONAD_ASSERT(transactions.size() == chain_context.authorities.size());
-
-        auto const revert_transaction = [&chain, &header, &chain_context](
-                                            Address const &sender,
-                                            Transaction const &tx,
-                                            uint64_t const i,
-                                            State &state) -> bool {
-            if constexpr (is_monad_trait_v<traits>) {
-                // If this cast doesn't succeed, then something has gone
-                // terribly wrong. It will throw an exception which we let
-                // the caller of `eth_trace_block_or_transaction_impl`
-                // handle.
-                return dynamic_cast<MonadChain const &>(chain)
-                    .revert_transaction(
-                        header.number,
-                        header.timestamp,
-                        sender,
-                        tx,
-                        header.base_fee_per_gas.value_or(0),
-                        i,
-                        state,
-                        chain_context);
-            }
-            else {
-                // Suppress unused parameter warnings
-                (void)chain;
-                (void)header;
-                (void)chain_context;
-                (void)sender;
-                (void)tx;
-                (void)i;
-                (void)state;
-                return false;
-            }
-        };
 
         size_t const transactions_size = [&]() {
             if (trace_transaction) {
@@ -443,6 +473,9 @@ namespace
         std::span<std::unique_ptr<CallTracerBase>> const noop_call_tracers_view{
             noop_call_tracers.data(), transactions_size};
 
+        auto const revert_transaction =
+            make_revert_lambda<traits>(chain, header, chain_context);
+
         // Trace single transaction
         if (trace_transaction) {
             // We allocate just one trace entry here as we only need to return
@@ -472,7 +505,7 @@ namespace
                 authorities_view,
                 block_state,
                 buffer,
-                pool,
+                tx_exec_pool,
                 metrics,
                 noop_call_tracers_view,
                 state_tracers_view,
@@ -521,7 +554,7 @@ namespace
                 authorities_view,
                 block_state,
                 buffer,
-                pool,
+                tx_exec_pool,
                 metrics,
                 noop_call_tracers_view,
                 state_tracers_view,
@@ -752,13 +785,76 @@ namespace
         // Underlying fiber pool.
         fiber::PriorityPool pool;
     };
+
+    // Group wraps a FiberGroup with additional tracking metadata.
+    // Unlike Pool which owns its threads, Group references a shared
+    // FiberThreadPool.
+    struct Group
+    {
+        Group(
+            unsigned const queue_limit, std::chrono::seconds const timeout,
+            std::unique_ptr<fiber::FiberGroup> group)
+            : limit(queue_limit)
+            , timeout(timeout)
+            , group(std::move(group))
+        {
+        }
+
+        monad_executor_pool_state get_state() const
+        {
+            return monad_executor_pool_state{
+                .num_fibers = group->num_fibers(),
+                .executing_count =
+                    executing_count.load(std::memory_order_relaxed),
+                .queued_count = queued_count.load(std::memory_order_relaxed),
+                .queue_limit = limit,
+                .queue_full_count =
+                    queue_full_count.load(std::memory_order_relaxed),
+            };
+        }
+
+        bool try_enqueue()
+        {
+            auto const current = queued_count.load(std::memory_order_relaxed);
+            if (current >= limit) {
+                queue_full_count.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
+            queued_count.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+
+        // Maximum number of requests in the queue.
+        unsigned limit;
+
+        // Timeout request if it failed to be scheduled in this time.
+        std::chrono::seconds timeout;
+
+        // Number of requests currently in the queue.
+        std::atomic<unsigned> queued_count{0};
+
+        // Number of requests currently being executed.
+        std::atomic<unsigned> executing_count{0};
+
+        // Number of queue full conditions.
+        std::atomic<uint64_t> queue_full_count{0};
+
+        // Underlying fiber group (references shared thread pool).
+        std::unique_ptr<fiber::FiberGroup> group;
+    };
 }
 
 struct monad_executor
 {
     Pool low_gas_pool_;
     Pool high_gas_pool_;
-    Pool trace_block_pool_;
+
+    // Shared thread pool for trace operations (reduces thread count)
+    fiber::FiberThreadPool trace_thread_pool_;
+
+    // Fiber groups sharing the trace thread pool
+    Group trace_block_group_; // Limits concurrent trace requests
+    Group trace_tx_exec_group_; // Executes transactions within trace blocks
 
     // Sequence number for each call. This is used as a priority of the request,
     // requests started earlier have higher priority.
@@ -775,10 +871,19 @@ struct monad_executor
         monad_executor_pool_config const &low_pool_config,
         monad_executor_pool_config const &high_pool_config,
         monad_executor_pool_config const &block_pool_config,
+        unsigned const tx_exec_num_fibers,
         uint64_t const node_lru_max_mem, std::string const &triedb_path)
         : low_gas_pool_{Pool::Type::low, low_pool_config}
         , high_gas_pool_{Pool::Type::high, high_pool_config}
-        , trace_block_pool_{Pool::Type::high, block_pool_config}
+        , trace_thread_pool_{block_pool_config.num_threads, true}
+        , trace_block_group_{
+              block_pool_config.queue_limit,
+              std::chrono::seconds(block_pool_config.timeout_sec),
+              trace_thread_pool_.create_fiber_group(block_pool_config.num_fibers)}
+        , trace_tx_exec_group_{
+              block_pool_config.queue_limit,
+              std::chrono::seconds(block_pool_config.timeout_sec),
+              trace_thread_pool_.create_fiber_group(tx_exec_num_fibers)}
         , db_{[&] {
             std::vector<std::filesystem::path> paths;
             if (std::filesystem::is_directory(triedb_path)) {
@@ -856,10 +961,6 @@ struct monad_executor
             return;
         }
 
-        auto const authorities =
-            recover_authorities(std::span{&txn, 1}, active_pool.pool);
-        MONAD_ASSERT(authorities.size() == 1);
-
         active_pool.pool.submit(
             eth_call_seq_no,
             [this,
@@ -872,7 +973,6 @@ struct monad_executor
              block_id = block_id,
              &db = db_,
              sender = sender,
-             authorities = authorities[0],
              result = result,
              complete = complete,
              user = user,
@@ -899,6 +999,15 @@ struct monad_executor
                         complete(result, user);
                         return;
                     }
+
+                    std::vector<std::optional<Address>> authorities(
+                        orig_txn.authorization_list.size());
+                    for (auto j = 0u; j < orig_txn.authorization_list.size();
+                         ++j) {
+                        authorities[j] =
+                            recover_authority(orig_txn.authorization_list[j]);
+                    }
+
                     auto transaction = orig_txn;
 
                     bool const override_with_low_gas_retry_if_oog =
@@ -1164,7 +1273,7 @@ struct monad_executor
             return;
         }
 
-        if (!trace_block_pool_.try_enqueue()) {
+        if (!trace_block_group_.try_enqueue()) {
             result->status_code = EVMC_REJECTED;
             result->message = strdup(EXCEED_QUEUE_SIZE_ERR_MSG);
             MONAD_ASSERT(result->message);
@@ -1174,7 +1283,7 @@ struct monad_executor
 
         auto const priority =
             call_seq_no_.fetch_add(1, std::memory_order_relaxed);
-        trace_block_pool_.pool.submit(
+        trace_block_group_.group->submit(
             priority,
             [this,
              block_id = block_id,
@@ -1183,7 +1292,8 @@ struct monad_executor
              chain_config = chain_config,
              complete = complete,
              &db = db_,
-             fiber_pool = &trace_block_pool_,
+             fiber_group = &trace_block_group_,
+             tx_exec_group = &trace_tx_exec_group_,
              grandparent_id = grandparent_id,
              parent_id = parent_id,
              result = result,
@@ -1191,9 +1301,9 @@ struct monad_executor
              trace_transaction = trace_transaction,
              transaction_index = transaction_index,
              user = user]() {
-                fiber_pool->queued_count.fetch_sub(
+                fiber_group->queued_count.fetch_sub(
                     1, std::memory_order_relaxed);
-                fiber_pool->executing_count.fetch_add(
+                fiber_group->executing_count.fetch_add(
                     1, std::memory_order_relaxed);
                 try {
                     auto const chain =
@@ -1228,8 +1338,7 @@ struct monad_executor
                     }
 
                     auto const &[senders, authorities] =
-                        recover_senders_and_authorities(
-                            transactions, fiber_pool->pool);
+                        recover_senders_and_authorities(transactions);
 
                     auto const senders_and_authorities =
                         combine_senders_and_authorities(senders, authorities);
@@ -1251,8 +1360,7 @@ struct monad_executor
                             PARENT_TRANSACTIONS_CONTEXT_ERR_MSG);
                         auto const &[parent_senders, parent_authorities] =
                             recover_senders_and_authorities(
-                                parent_transactions.assume_value(),
-                                fiber_pool->pool);
+                                parent_transactions.assume_value());
                         parent_senders_and_authorities = std::make_unique<
                             ankerl::unordered_dense::segmented_set<Address>>(
                             combine_senders_and_authorities(
@@ -1268,8 +1376,7 @@ struct monad_executor
                         auto const
                             &[grandparent_senders, grandparent_authorities] =
                                 recover_senders_and_authorities(
-                                    grandparent_transactions.assume_value(),
-                                    fiber_pool->pool);
+                                    grandparent_transactions.assume_value());
                         grandparent_senders_and_authorities = std::make_unique<
                             ankerl::unordered_dense::segmented_set<Address>>(
                             combine_senders_and_authorities(
@@ -1309,7 +1416,7 @@ struct monad_executor
                                 transaction_index,
                                 block_state,
                                 block_hash_buffer,
-                                fiber_pool->pool,
+                                *tx_exec_group->group,
                                 tracer_config);
                             MONAD_ASSERT(false);
                         }
@@ -1328,7 +1435,7 @@ struct monad_executor
                                 transaction_index,
                                 block_state,
                                 block_hash_buffer,
-                                fiber_pool->pool,
+                                *tx_exec_group->group,
                                 tracer_config);
                             MONAD_ASSERT(false);
                         }
@@ -1381,7 +1488,8 @@ monad_executor *monad_executor_create(
     monad_executor_pool_config const low_pool_conf,
     monad_executor_pool_config const high_pool_conf,
     monad_executor_pool_config const block_pool_conf,
-    uint64_t const node_lru_max_mem, char const *const dbpath)
+    unsigned const tx_exec_num_fibers, uint64_t const node_lru_max_mem,
+    char const *const dbpath)
 {
     MONAD_ASSERT(dbpath);
     std::string const triedb_path{dbpath};
@@ -1390,6 +1498,7 @@ monad_executor *monad_executor_create(
         low_pool_conf,
         high_pool_conf,
         block_pool_conf,
+        tx_exec_num_fibers,
         node_lru_max_mem,
         triedb_path);
 
@@ -1463,7 +1572,7 @@ struct monad_executor_state monad_executor_get_state(monad_executor *const e)
     return monad_executor_state{
         .low_gas_pool_state = e->low_gas_pool_.get_state(),
         .high_gas_pool_state = e->high_gas_pool_.get_state(),
-        .trace_block_pool_state = e->trace_block_pool_.get_state(),
+        .trace_block_pool_state = e->trace_block_group_.get_state(),
     };
 }
 

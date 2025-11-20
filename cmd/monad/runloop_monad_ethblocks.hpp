@@ -13,21 +13,33 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#include <category/core/fiber/priority_pool.hpp>
+#pragma once
 
-#include <category/core/fiber/config.hpp>
-#include <category/core/fiber/fiber_group.hpp>
-#include <category/core/fiber/fiber_thread_pool.hpp>
+#include <category/core/config.hpp>
+#include <category/core/result.hpp>
+#include <category/execution/ethereum/chain/chain_config.h>
+#include <category/vm/vm.hpp>
 
-#include <memory>
+#include <cstdint>
+#include <filesystem>
+#include <utility>
 
-MONAD_FIBER_NAMESPACE_BEGIN
+#include <signal.h>
 
-PriorityPool::PriorityPool(
-    unsigned const n_threads, unsigned const n_fibers, bool const prevent_spin)
-    : thread_pool_{std::make_unique<FiberThreadPool>(n_threads, prevent_spin)}
-    , fiber_group_{thread_pool_->create_fiber_group(n_fibers)}
+MONAD_NAMESPACE_BEGIN
+
+struct MonadChain;
+struct Db;
+class BlockHashBufferFinalized;
+
+namespace fiber
 {
+    class PriorityPool;
 }
 
-MONAD_FIBER_NAMESPACE_END
+Result<std::pair<uint64_t, uint64_t>> runloop_monad_ethblocks(
+    MonadChain const &, std::filesystem::path const &, Db &, vm::VM &,
+    BlockHashBufferFinalized &, fiber::PriorityPool &, uint64_t &, uint64_t,
+    sig_atomic_t const volatile &, bool enable_tracing);
+
+MONAD_NAMESPACE_END

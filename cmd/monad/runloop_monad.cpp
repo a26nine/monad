@@ -204,7 +204,8 @@ Result<BlockExecOutput> propose_block(
                              .senders_and_authorities =
                                  std::move(senders_and_authorities)})
                      .second);
-    BOOST_OUTCOME_TRY(static_validate_monad_senders<traits>(senders));
+    BOOST_OUTCOME_TRY(
+        static_validate_monad_body<traits>(senders, block.transactions));
 
     // Create call frames vectors for tracers
     std::vector<std::vector<CallFrame>> call_frames{block.transactions.size()};
@@ -268,7 +269,7 @@ Result<BlockExecOutput> propose_block(
             recovered_authorities,
             block_state,
             block_hash_buffer,
-            priority_pool,
+            priority_pool.fiber_group(),
             block_metrics,
             call_tracers,
             state_tracers,
