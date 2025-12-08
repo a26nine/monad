@@ -306,6 +306,7 @@ namespace monad::vm::compiler::native
         void shl();
         void shr();
         void sar();
+        void clz();
 
         void and_();
         void or_();
@@ -350,6 +351,8 @@ namespace monad::vm::compiler::native
         bool mulmod_opt();
         void mulmod(int64_t remaining_base_gas);
 
+        template <typename T, size_t N>
+        void array_leading_zeros(std::array<T, N> const &);
         template <typename T, size_t N>
         void array_byte_width(std::array<T, N> const &);
 
@@ -858,9 +861,11 @@ namespace monad::vm::compiler::native
         void jumpi_keep_fallthrough_stack();
 
         void read_context_address(int32_t offset);
+        void read_evmc_tx_context_address(int32_t offset);
         void read_context_word(int32_t offset);
+        void read_evmc_tx_context_word(int32_t offset);
         void read_context_uint32_to_word(int32_t offset);
-        void read_context_uint64_to_word(int32_t offset);
+        void read_evmc_tx_context_uint64_to_word(int32_t offset);
 
         void lt(StackElemRef dst, StackElemRef src);
         void slt(StackElemRef dst, StackElemRef src);

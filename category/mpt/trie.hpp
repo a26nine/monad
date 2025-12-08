@@ -205,6 +205,9 @@ class UpdateAuxImpl
     // clear all versions <= version, release unused disk space
     void erase_versions_up_to_and_including(uint64_t version);
 
+    double
+    calculate_disk_usage_if_erased_up_to_and_including(uint64_t version) const;
+
     /* Calculate the version up to which the database will automatically expire
     entries (referred to as "auto_expire" in code names).
 
@@ -392,6 +395,9 @@ protected:
     };
 
 public:
+    // Allocate the first cnv chunk for db metadata copies
+    static constexpr unsigned cnv_chunks_for_db_metadata = 1;
+
     int64_t curr_upsert_auto_expire_version{0};
     compact_virtual_chunk_offset_t compact_offset_fast{
         MIN_COMPACT_VIRTUAL_OFFSET};
@@ -405,13 +411,15 @@ public:
 
     detail::TrieUpdateCollectedStats stats;
 
+    // in-memory
+    UpdateAuxImpl() = default;
+
+    // on-disk
     explicit UpdateAuxImpl(
-        MONAD_ASYNC_NAMESPACE::AsyncIO *io_ = nullptr,
+        MONAD_ASYNC_NAMESPACE::AsyncIO &io_,
         std::optional<uint64_t> const history_len = {})
     {
-        if (io_) {
-            set_io(io_, history_len);
-        }
+        set_io(io_, history_len);
     }
 
     virtual ~UpdateAuxImpl();
@@ -550,7 +558,7 @@ public:
     }
 
     void set_io(
-        MONAD_ASYNC_NAMESPACE::AsyncIO *,
+        MONAD_ASYNC_NAMESPACE::AsyncIO &,
         std::optional<uint64_t> history_length = {});
 
     void unset_io();
@@ -605,6 +613,9 @@ public:
                                : version_lower_bound;
                 auto const max_version =
                     next_version_.load(std::memory_order_acquire) - 1;
+                if (max_version == INVALID_BLOCK_NUM) {
+                    return;
+                }
                 while (idx < max_version && (*this)[idx] == INVALID_OFFSET) {
                     idx++;
                 }
@@ -934,16 +945,27 @@ class UpdateAux final : public UpdateAuxImpl
     }
 
 public:
+    // in-memory
+    UpdateAux() = default;
+
+    // on-disk
     explicit UpdateAux(
-        MONAD_ASYNC_NAMESPACE::AsyncIO *io_ = nullptr,
+        MONAD_ASYNC_NAMESPACE::AsyncIO &io_,
         std::optional<uint64_t> const history_len = {})
         : UpdateAuxImpl(io_, history_len)
     {
     }
 
-    // NOLINTNEXTLINE(google-explicit-constructor)
-    UpdateAux(
-        LockType &&lock, MONAD_ASYNC_NAMESPACE::AsyncIO *io_ = nullptr,
+    // in-memory with lock
+    explicit UpdateAux(LockType &&lock)
+        : UpdateAuxImpl()
+        , lock_(std::move(lock))
+    {
+    }
+
+    // on-disk with lock
+    explicit UpdateAux(
+        LockType &&lock, MONAD_ASYNC_NAMESPACE::AsyncIO &io_,
         std::optional<uint64_t> const history_len = {})
         : UpdateAuxImpl(io_, history_len)
         , lock_(std::move(lock))
@@ -985,9 +1007,12 @@ class UpdateAux<void> final : public UpdateAuxImpl
     }
 
 public:
-    // NOLINTNEXTLINE(google-explicit-constructor)
-    UpdateAux(
-        MONAD_ASYNC_NAMESPACE::AsyncIO *io_ = nullptr,
+    // in-memory
+    UpdateAux() = default;
+
+    // on-disk
+    explicit UpdateAux(
+        MONAD_ASYNC_NAMESPACE::AsyncIO &io_,
         std::optional<uint64_t> const history_len = {})
         : UpdateAuxImpl(io_, history_len)
     {

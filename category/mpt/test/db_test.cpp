@@ -846,7 +846,7 @@ TEST(DbTest, history_length_adjustment_never_under_min)
     monad::io::Buffers read_buffers = monad::io::make_buffers_for_read_only(
         read_ring, 128, monad::async::AsyncIO::MONAD_IO_BUFFERS_READ_SIZE);
     monad::async::AsyncIO io_ctx(pool, read_buffers);
-    UpdateAux aux_reader{&io_ctx};
+    UpdateAux aux_reader{io_ctx};
 
     auto batch_upsert_once = [&](uint64_t const version) {
         UpdateList ls;
@@ -2071,6 +2071,86 @@ TEST_F(OnDiskDbWithFileFixture, copy_trie_to_different_version_modify_state)
     }
 }
 
+TEST(DbTest, move_trie_version_forward_history_ring_wrap_around)
+{
+    auto const dbname = create_temp_file(2);
+    auto undb = monad::make_scope_exit(
+        [&]() noexcept { std::filesystem::remove(dbname); });
+    StateMachineAlwaysEmpty machine{};
+    OnDiskDbConfig config{
+        .compaction = true,
+        .sq_thread_cpu{std::nullopt},
+        .dbname_paths = {dbname}};
+    Db db{machine, config};
+    Node::SharedPtr root;
+
+    uint64_t const root_offsets_ring_capacity = [&] {
+        monad::async::storage_pool::creation_flags pool_options;
+        pool_options.open_read_only = true;
+        monad::async::storage_pool pool_ro(
+            config.dbname_paths,
+            monad::async::storage_pool::mode::open_existing,
+            pool_options);
+        monad::io::Ring ring;
+        monad::io::Buffers robuf = monad::io::make_buffers_for_read_only(
+            ring, 2, monad::async::AsyncIO::MONAD_IO_BUFFERS_READ_SIZE);
+        monad::async::AsyncIO testio(pool_ro, robuf);
+        monad::mpt::UpdateAux<> aux_reader{testio};
+        return aux_reader.root_offsets().capacity();
+    }();
+
+    auto const prefix = 0x0012_bytes;
+    monad::byte_string const kv = keccak_int_to_string(10);
+
+    // fill version 0-100
+    for (uint64_t version = 0; version <= 100; ++version) {
+        root = upsert_updates_flat_list(
+            std::move(root), db, prefix, version, make_update(kv, kv));
+        EXPECT_TRUE(db.find(root, prefix + kv, version).has_value());
+        EXPECT_EQ(db.get_earliest_version(), 0);
+        EXPECT_EQ(db.get_latest_version(), version);
+    }
+
+    // move version 100 to root_offsets_ring_capacity
+    db.move_trie_version_forward(
+        db.get_latest_version(), root_offsets_ring_capacity - 1);
+    EXPECT_EQ(db.get_latest_version(), root_offsets_ring_capacity - 1);
+    EXPECT_TRUE(
+        db.find(root, prefix + kv, root_offsets_ring_capacity - 1).has_value());
+
+    // fill more versions to cause the ring buffer to wrap around
+    for (uint64_t version = root_offsets_ring_capacity;
+         version < root_offsets_ring_capacity + 10;
+         ++version) {
+        root = upsert_updates_flat_list(
+            std::move(root), db, prefix, version, make_update(kv, kv));
+        EXPECT_TRUE(db.find(root, prefix + kv, version).has_value());
+        EXPECT_EQ(
+            db.get_earliest_version(),
+            version - root_offsets_ring_capacity + 1);
+        EXPECT_EQ(db.get_latest_version(), version);
+    }
+
+    uint64_t const dest_version = root_offsets_ring_capacity + 60;
+    db.move_trie_version_forward(db.get_latest_version(), dest_version);
+    EXPECT_EQ(
+        db.get_earliest_version(),
+        dest_version - root_offsets_ring_capacity + 1);
+    EXPECT_TRUE(
+        db.find(root, prefix + kv, db.get_earliest_version()).has_value());
+    EXPECT_EQ(db.get_latest_version(), dest_version);
+    EXPECT_TRUE(
+        db.find(root, prefix + kv, db.get_latest_version()).has_value());
+
+    uint64_t const new_dest_version =
+        db.get_latest_version() + root_offsets_ring_capacity;
+    db.move_trie_version_forward(db.get_latest_version(), new_dest_version);
+    EXPECT_EQ(db.get_latest_version(), new_dest_version);
+    EXPECT_EQ(db.get_earliest_version(), new_dest_version);
+    EXPECT_TRUE(
+        db.find(root, prefix + kv, db.get_latest_version()).has_value());
+}
+
 TEST_F(OnDiskDbWithFileFixture, history_ring_buffer_wrap_around)
 {
     auto const prefix = 0x0012_bytes;
@@ -2090,7 +2170,7 @@ TEST_F(OnDiskDbWithFileFixture, history_ring_buffer_wrap_around)
         monad::io::Buffers robuf = monad::io::make_buffers_for_read_only(
             ring, 2, monad::async::AsyncIO::MONAD_IO_BUFFERS_READ_SIZE);
         monad::async::AsyncIO testio(pool_ro, robuf);
-        monad::mpt::UpdateAux<> aux_reader{&testio};
+        monad::mpt::UpdateAux<> aux_reader{testio};
         return aux_reader.root_offsets().capacity();
     }();
     std::cout << root_offsets_ring_capacity << std::endl;
@@ -2330,7 +2410,7 @@ TEST_F(
     // Move trie version to a later dest_block_id, which invalidates some
     // but not all history versions
     uint64_t const dest_block_id = ro_db.get_history_length() + 5;
-    db.move_trie_version_forward(block_id, dest_block_id);
+    db.move_trie_version_forward(db.get_latest_version(), dest_block_id);
 
     // Now valid version are 6-9, 1005 (MPT_TEST_HISTORY_LENGTH+5)
     EXPECT_EQ(ro_db.get_latest_version(), dest_block_id);
