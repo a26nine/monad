@@ -797,20 +797,23 @@ int main(int argc, char *argv[])
     std::optional<std::filesystem::path> dump_binary_snapshot;
     std::optional<std::filesystem::path> load_binary_snapshot;
     uint64_t version;
+    unsigned dump_concurrency_limit = 2048;
+    uint64_t total_shards = 1;
+    uint64_t shard_number = 0;
 
-    CLI::App cli{"monad_cli"};
+    CLI::App cli{"monad-cli"};
     cli.add_option(
            "--db",
            dbname_paths,
            "A comma-separated list of previously created database paths")
         ->required();
     cli.add_option(
-        "--sq_thread_cpu",
+        "--sq-thread-cpu,--sq_thread_cpu",
         sq_thread_cpu,
         "CPU core binding for the io_uring SQPOLL thread. Specifies the CPU "
         "set for the kernel polling thread in SQPOLL mode. Defaults to "
         "disabled SQPOLL mode.");
-    cli.add_option("--log_level", log_level, "level of logging")
+    cli.add_option("--log-level,--log_level", log_level, "level of logging")
         ->transform(CLI::CheckedTransformer(log_level_map, CLI::ignore_case));
     auto *const mode_group =
         cli.add_option_group("mode", "different modes of the cli");
@@ -820,12 +823,32 @@ int main(int argc, char *argv[])
         mode_group->add_option_group("cli", "options for non-interactive mode");
     cli_group->add_option("--version", version)->required();
     auto *const dump_binary_snapshot_option = cli_group->add_option(
-        "--dump_binary_snapshot",
+        "--dump-binary-snapshot,--dump_binary_snapshot",
         dump_binary_snapshot,
         "Dump a binary snapshot to directory");
+    cli_group->add_option(
+        "--dump-concurrency-limit,--dump_concurrency_limit",
+        dump_concurrency_limit,
+        "Read concurrency limit for snapshot dump");
     cli_group
         ->add_option(
-            "--load_binary_snapshot",
+            "--total-shards,--total_shards",
+            total_shards,
+            "Total number of shards to split snapshot creation across nodes "
+            "(default: 1)")
+        ->check(CLI::Range(1u, MONAD_SNAPSHOT_SHARDS))
+        ->needs(dump_binary_snapshot_option);
+    cli_group
+        ->add_option(
+            "--shard-number,--shard_number",
+            shard_number,
+            "Shard number for this node (0 to total_shards-1, default: 0). "
+            "Each "
+            "shard writes its portion of data and headers.")
+        ->needs(dump_binary_snapshot_option);
+    cli_group
+        ->add_option(
+            "--load-binary-snapshot,--load_binary_snapshot",
             load_binary_snapshot,
             "Load a binary snapshot to db")
         ->check(CLI::ExistingDirectory)
@@ -875,6 +898,14 @@ int main(int argc, char *argv[])
         }
     }
     if (dump_binary_snapshot.has_value()) {
+        if (shard_number >= total_shards) {
+            LOG_ERROR(
+                "shard_number ({}) must be < total_shards ({})",
+                shard_number,
+                total_shards);
+            return 1;
+        }
+
         auto *const context =
             monad_db_snapshot_filesystem_write_user_context_create(
                 dump_binary_snapshot.value().c_str(), version);
@@ -889,7 +920,10 @@ int main(int argc, char *argv[])
             sq_thread_cpu.value_or(std::numeric_limits<unsigned>::max()),
             version,
             monad_db_snapshot_write_filesystem,
-            context);
+            context,
+            dump_concurrency_limit,
+            total_shards,
+            shard_number);
         LOG_INFO(
             "snapshot dump success={} version={} directory={} elapsed={}",
             success,

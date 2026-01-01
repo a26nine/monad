@@ -14,29 +14,28 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include <category/core/runtime/uint256.hpp>
+#include <category/vm/compiler/ir/basic_blocks.hpp>
+#include <category/vm/evm/explicit_traits.hpp>
+#include <category/vm/evm/traits.hpp>
 #include <category/vm/llvm/execute.hpp>
 #include <category/vm/llvm/llvm.hpp>
-#include <category/vm/llvm/llvm_state.hpp>
 #include <category/vm/runtime/transmute.hpp>
 #include <category/vm/runtime/types.hpp>
+#include <category/vm/utils/evmc_utils.hpp>
 
 #include <evmc/evmc.h>
 #include <evmc/evmc.hpp>
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <memory>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <vector>
-
-#ifdef MONAD_VM_LLVM_DEBUG
-    #include <category/vm/utils/evmc_utils.hpp>
-    #include <cstdlib>
-    #include <format>
-    #include <string>
-#endif
 
 namespace monad::vm::llvm
 {
@@ -95,16 +94,12 @@ namespace monad::vm::llvm
             return item->second;
         }
 
-#ifdef MONAD_VM_LLVM_DEBUG
         auto const *isq = std::getenv("MONAD_VM_LLVM_DEBUG");
         auto code_hash_str = monad::vm::utils::hex_string(code_hash);
         std::string const hash_str =
             std::format(".{}.{}", (int)rev, code_hash_str);
         std::string const dbg_nm = isq ? "t" + hash_str : "";
         auto ptr = monad::vm::llvm::compile(rev, {code, code_size}, dbg_nm);
-#else
-        auto ptr = monad::vm::llvm::compile(rev, {code, code_size});
-#endif
 
         cached_llvm_code_[rev].insert({code_hash, ptr});
 
@@ -128,5 +123,23 @@ namespace monad::vm::llvm
 
         return ctx.copy_to_evmc_result();
     }
+
+    void execute_compiled_llvm(
+        std::shared_ptr<LLVMState> llvm, runtime::Context *ctx,
+        uint8_t *evm_stack)
+    {
+        monad::vm::llvm::execute(
+            *llvm, *ctx, reinterpret_cast<runtime::uint256_t *>(evm_stack));
+    }
+
+    template <Traits traits>
+    std::shared_ptr<LLVMState> compile_basicblocks_llvm(
+        compiler::basic_blocks::BasicBlocksIR const &ir,
+        std::string const &dbg_nm)
+    {
+        return monad::vm::llvm::compile_basicblocks_impl<traits>(ir, dbg_nm);
+    }
+
+    EXPLICIT_TRAITS(compile_basicblocks_llvm);
 
 }

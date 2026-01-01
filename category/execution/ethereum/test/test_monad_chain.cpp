@@ -70,16 +70,16 @@ TYPED_TEST(TraitsTest, Genesis)
             to_bytes(keccak256(rlp::encode_block_header(header)));
         EXPECT_EQ(
             hash,
-            0x1436534e54a22183ea29a2273b341cb50018ed066441ffd111cd263297caba35_bytes32);
+            0x298034669ee44327d2da9744b9b2782848e2f2a6959756b7b0471b09a404f5c9_bytes32);
 
         auto result =
             static_validate_header<typename TestFixture::Trait>(header);
-        if constexpr (TestFixture::Trait::evm_rev() < EVMC_LONDON) {
+        if constexpr (TestFixture::Trait::evm_rev() >= EVMC_PRAGUE) {
             EXPECT_TRUE(result.has_value());
         }
         else {
-            // the header generated at the time was not a valid header for the
-            // Paris revision or above
+            // the header generated at the time was only valid in the Prague
+            // revision and onwards
             EXPECT_TRUE(result.has_error());
         }
     }
@@ -243,9 +243,7 @@ void run_revert_transaction_test(
         state.subtract_from_balance(SENDER, gas_fee);
         uint256_t const value = uint256_t{value_mon} * 1000000000000000000ULL;
         state.subtract_from_balance(SENDER, value);
-        bool should_revert = revert_monad_transaction(
-            traits::monad_rev(),
-            traits::evm_rev(),
+        bool should_revert = revert_monad_transaction<traits>(
             SENDER,
             tx,
             BASE_FEE_PER_GAS,
@@ -436,15 +434,8 @@ TYPED_TEST(MonadTraitsTest, reserve_checks_code_hash)
     State state{bs, Incarnation{1, 1}};
     prepare_state(state);
 
-    bool const should_revert = revert_monad_transaction(
-        traits::monad_rev(),
-        traits::evm_rev(),
-        SENDER,
-        tx,
-        BASE_FEE_PER_GAS,
-        0,
-        state,
-        context);
+    bool const should_revert = revert_monad_transaction<traits>(
+        SENDER, tx, BASE_FEE_PER_GAS, 0, state, context);
 
     if constexpr (traits::monad_rev() < MONAD_FOUR) {
         EXPECT_FALSE(should_revert);

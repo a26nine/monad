@@ -32,7 +32,7 @@ using namespace monad::vm;
 using namespace monad::vm::runtime;
 using namespace monad::vm::utils::evm_as;
 
-using traits = EvmTraits<EVMC_PRAGUE>;
+using traits = EvmTraits<EVMC_OSAKA>;
 
 struct CommandArguments
 {
@@ -277,21 +277,31 @@ static void run_implementation_benchmark(
     }
 }
 
+using enum BlockchainTestVM::Implementation;
+
+static BlockchainTestVM::Implementation const all_impls[] = {
+    Interpreter,
+    BlockchainTestVM::Implementation::Compiler,
+    Evmone,
+#ifdef MONAD_COMPILER_LLVM
+    LLVM,
+#endif
+};
+
 static void run_benchmark(CommandArguments const &args, Benchmark const &bench)
 {
-    using enum BlockchainTestVM::Implementation;
-
     if (!filter_search(bench.title, args.title_filters)) {
         return;
     }
-
-    for (auto const impl : {Interpreter, Compiler, LLVM, Evmone}) {
+    for (auto const impl : all_impls) {
         run_implementation_benchmark(args, impl, bench);
     }
 }
 
 static std::vector<EvmBuilder<traits>> const basic_una_math_builders = {
-    EvmBuilder<traits>{}.iszero(), EvmBuilder<traits>{}.not_()};
+    EvmBuilder<traits>{}.iszero(),
+    EvmBuilder<traits>{}.not_(),
+    EvmBuilder<traits>{}.clz()};
 
 static std::vector<EvmBuilder<traits>> const basic_bin_math_builders = {
     EvmBuilder<traits>{}.add(),

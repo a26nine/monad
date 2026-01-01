@@ -91,6 +91,8 @@ add_library(
   # ethereum/db
   "ethereum/db/block_db.cpp"
   "ethereum/db/block_db.hpp"
+  "ethereum/db/commit_builder.cpp"
+  "ethereum/db/commit_builder.hpp"
   "ethereum/db/db.hpp"
   "ethereum/db/db_cache.hpp"
   "ethereum/db/db_snapshot.cpp"
@@ -179,6 +181,8 @@ add_library(
   "ethereum/state3/state.cpp"
   "ethereum/state3/state.hpp"
   "ethereum/state3/version_stack.hpp"
+  # ethereum/test
+  "ethereum/test/test_traits_state.hpp"
   # ethereum/types
   "ethereum/types/incarnation.hpp"
   "ethereum/types/fmt/incarnation_fmt.hpp")

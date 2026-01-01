@@ -188,8 +188,7 @@ class UpdateAuxImpl
     struct db_metadata_
     {
         detail::db_metadata *main{nullptr};
-        std::span<chunk_offset_t>
-            root_offsets; // if not-null, mmap of DB version ring buffer storage
+        std::span<chunk_offset_t> root_offsets;
     } db_metadata_[2]; // two copies, to prevent sudden process
                        // exits making the DB irretrievable
 
@@ -630,16 +629,15 @@ public:
                       m->main->root_offsets.version_lower_bound_)
                 , next_version_(m->main->root_offsets.next_version_)
                 , root_offsets_chunks_(
-                      m->root_offsets.empty()
-                          ? std::span<chunk_offset_t>(
-                                m->main->root_offsets.storage_.arr)
-                          : std::span<chunk_offset_t>(m->root_offsets))
+                      std::span<chunk_offset_t>(m->root_offsets))
             {
-                MONAD_DEBUG_ASSERT(
+                MONAD_ASSERT_PRINTF(
                     root_offsets_chunks_.size() ==
-                    1ULL
-                        << (63 -
-                            std::countl_zero(root_offsets_chunks_.size())));
+                        1ULL
+                            << (63 -
+                                std::countl_zero(root_offsets_chunks_.size())),
+                    "root offsets chunks size is %lu, not a power of 2",
+                    root_offsets_chunks_.size());
             }
 
             size_t capacity() const noexcept
@@ -1092,7 +1090,7 @@ template <class T>
 using find_result_type = std::pair<T, find_result>;
 
 using find_cursor_result_type = find_result_type<NodeCursor>;
-using find_owning_cursor_result_type = find_result_type<CacheNodeCursor>;
+using find_owning_cursor_result_type = find_result_type<NodeCursor>;
 
 using inflight_map_t = ankerl::unordered_dense::segmented_map<
     chunk_offset_t,
@@ -1102,8 +1100,8 @@ using inflight_map_t = ankerl::unordered_dense::segmented_map<
 
 using inflight_map_owning_t = ankerl::unordered_dense::segmented_map<
     virtual_chunk_offset_t,
-    std::vector<std::function<MONAD_ASYNC_NAMESPACE::result<void>(
-        CacheNodeCursor const &)>>,
+    std::vector<
+        std::function<MONAD_ASYNC_NAMESPACE::result<void>(NodeCursor const &)>>,
     virtual_chunk_offset_t_hasher>;
 
 // The request type to put to the fiber buffered channel for triedb thread
@@ -1132,7 +1130,7 @@ void find_notify_fiber_future(
 void find_owning_notify_fiber_future(
     UpdateAuxImpl &, NodeCache &, inflight_map_owning_t &,
     threadsafe_boost_fibers_promise<find_owning_cursor_result_type> &promise,
-    CacheNodeCursor const &start, NibblesView, uint64_t version);
+    NodeCursor const &start, NibblesView, uint64_t version);
 
 // rodb load root
 void load_root_notify_fiber_future(

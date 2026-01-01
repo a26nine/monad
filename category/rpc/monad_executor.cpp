@@ -56,6 +56,7 @@
 #include <category/execution/monad/chain/monad_devnet.hpp>
 #include <category/execution/monad/chain/monad_mainnet.hpp>
 #include <category/execution/monad/chain/monad_testnet.hpp>
+#include <category/execution/monad/reserve_balance.hpp>
 #include <category/mpt/db.hpp>
 #include <category/mpt/nibbles_view.hpp>
 #include <category/mpt/ondisk_db_config.hpp>
@@ -209,28 +210,21 @@ namespace
 
     template <Traits traits>
     auto make_revert_lambda(
-        Chain const &chain, BlockHeader const &header,
-        MonadChainContext const &chain_context)
+        BlockHeader const &header, MonadChainContext const &chain_context)
     {
         if constexpr (is_monad_trait_v<traits>) {
-            return [&chain, &header, &chain_context](
+            return [&header, &chain_context](
                        Address const &sender,
                        Transaction const &tx,
                        uint64_t const i,
                        State &state) -> bool {
-                // If this cast doesn't succeed, then something has gone
-                // terribly wrong. It will throw an exception which we let
-                // the caller of this simulation / replay handle.
-                return dynamic_cast<MonadChain const &>(chain)
-                    .revert_transaction(
-                        header.number,
-                        header.timestamp,
-                        sender,
-                        tx,
-                        header.base_fee_per_gas.value_or(0),
-                        i,
-                        state,
-                        chain_context);
+                return revert_monad_transaction<traits>(
+                    sender,
+                    tx,
+                    header.base_fee_per_gas.value_or(0),
+                    i,
+                    state,
+                    chain_context);
             };
         }
         else {
@@ -278,15 +272,14 @@ namespace
                  state_overrides.override_sets) {
                 // This would avoid seg-fault on storage override for
                 // non-existing accounts
-                auto const &account = state.recent_account(address);
-                if (MONAD_UNLIKELY(!account.has_value())) {
+                if (MONAD_UNLIKELY(!state.account_exists(address))) {
                     state.create_contract(address);
                 }
 
                 if (state_delta.balance.has_value()) {
-                    auto const balance = state_delta.balance.value();
-                    auto const pessimistic_balance = intx::be::load<uint256_t>(
-                        state.get_current_balance_pessimistic(address));
+                    uint256_t const balance = state_delta.balance.value();
+                    uint256_t const pessimistic_balance =
+                        state.get_balance(address);
                     if (balance > pessimistic_balance) {
                         state.add_to_balance(
                             address, balance - pessimistic_balance);
@@ -337,21 +330,20 @@ namespace
         // However, eth_call doesn't take a nonce parameter.
         // Solving the issue by manually setting nonce to match with the
         // expected nonce
-        auto const &acct = state.recent_account(sender);
-        enriched_txn.nonce = acct.has_value() ? acct.value().nonce : 0;
-
-        // validate_transaction expects the sender of a transaction is EOA, not
-        // CA. However, eth_call allows the sender to be CA to simulate a
-        // subroutine. Solving this issue by manually setting account to be EOA
-        // for validation
-        std::optional<Account> eoa = acct;
-        if (eoa.has_value()) {
-            eoa.value().code_hash = NULL_HASH;
-        }
+        enriched_txn.nonce = state.get_nonce(sender);
 
         // Safe to pass empty code to validation here because the above override
         // will always mark this transaction as coming from an EOA.
-        BOOST_OUTCOME_TRY(validate_transaction<traits>(enriched_txn, eoa, {}));
+        {
+            State state{block_state, incarnation};
+            // validate_transaction expects the sender of a transaction is EOA,
+            // not CA. However, eth_call allows the sender to be CA to simulate
+            // a subroutine. Solving this issue by manually setting account to
+            // be EOA for validation
+            state.set_code(sender, {});
+            BOOST_OUTCOME_TRY(
+                validate_transaction<traits>(enriched_txn, sender, state));
+        }
 
         auto const senders = std::vector{sender};
         auto const authorities_vec =
@@ -382,7 +374,7 @@ namespace
             authorities,
             header,
             0,
-            make_revert_lambda<traits>(chain, header, chain_context),
+            make_revert_lambda<traits>(header, chain_context),
         }(state, host);
 
         // compute gas_refund and gas_used
@@ -474,7 +466,7 @@ namespace
             noop_call_tracers.data(), transactions_size};
 
         auto const revert_transaction =
-            make_revert_lambda<traits>(chain, header, chain_context);
+            make_revert_lambda<traits>(header, chain_context);
 
         // Trace single transaction
         if (trace_transaction) {
@@ -490,7 +482,7 @@ namespace
             state_tracers.emplace_back(
                 tracer_config == PRESTATE_TRACER
                     ? std::make_unique<trace::StateTracer>(
-                          trace::PrestateTracer{trace})
+                          trace::PrestateTracer{trace, header.beneficiary})
                     : std::make_unique<trace::StateTracer>(
                           trace::StateDiffTracer{trace}));
 
@@ -534,7 +526,8 @@ namespace
                 if (tracer_config == PRESTATE_TRACER) {
                     state_tracers.emplace_back(
                         std::make_unique<trace::StateTracer>(
-                            trace::PrestateTracer{traces[i]["result"]}));
+                            trace::PrestateTracer{
+                                traces[i]["result"], header.beneficiary}));
                 }
                 else {
                     state_tracers.emplace_back(
@@ -1051,7 +1044,8 @@ struct monad_executor
                         case CALL_TRACER:
                             return std::monostate{};
                         case PRESTATE_TRACER:
-                            return trace::PrestateTracer{state_trace};
+                            return trace::PrestateTracer{
+                                state_trace, block_header.beneficiary};
                         case STATEDIFF_TRACER:
                             return trace::StateDiffTracer{state_trace};
                         case ACCESS_LIST_TRACER:

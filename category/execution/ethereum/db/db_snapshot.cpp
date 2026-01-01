@@ -17,6 +17,7 @@
 #include <category/core/byte_string.hpp>
 #include <category/core/config.hpp>
 #include <category/core/endian.hpp> // little endian
+#include <category/core/nibble.h>
 #include <category/core/unaligned.hpp>
 #include <category/execution/ethereum/core/rlp/block_rlp.hpp>
 #include <category/execution/ethereum/db/db_snapshot.h>
@@ -29,11 +30,6 @@
 
 #include <deque>
 #include <limits>
-
-inline constexpr unsigned MONAD_SNAPSHOT_SHARD_NIBBLES = 2;
-inline constexpr unsigned MONAD_SNAPSHOT_SHARDS =
-    1 << (MONAD_SNAPSHOT_SHARD_NIBBLES * 4);
-static_assert(MONAD_SNAPSHOT_SHARDS == 256);
 
 struct monad_db_snapshot_loader
 {
@@ -161,29 +157,80 @@ uint64_t monad_db_snapshot_loader_read_account(
     return bytes_consumed;
 }
 
+class NibblePath
+{
+private:
+    // 128 nibbles max: 64 (account hash) + 64 (storage hash)
+    // Note: finalized and code/data nibbles are handled separately and not
+    // stored in path
+    std::array<unsigned char, 64> buffer_{};
+    uint8_t length_{0};
+
+public:
+    void append(unsigned char branch, monad::mpt::NibblesView node_path)
+    {
+        using namespace monad::mpt;
+        unsigned const src_nibbles = node_path.nibble_size();
+        MONAD_ASSERT(length_ + 1 + src_nibbles <= buffer_.size() * 2);
+
+        // Append branch nibble
+        set_nibble(buffer_.data(), length_, branch);
+        ++length_;
+
+        if (src_nibbles == 0) {
+            return;
+        }
+
+        for (unsigned i = 0; i < src_nibbles; ++i) {
+            set_nibble(buffer_.data(), length_ + i, node_path.get(i));
+        }
+        length_ = static_cast<uint8_t>(length_ + src_nibbles);
+    }
+
+    void pop(uint8_t nibble_count)
+    {
+        MONAD_ASSERT(length_ >= nibble_count);
+        length_ -= nibble_count;
+    }
+
+    [[nodiscard]] monad::mpt::NibblesView view() const
+    {
+        return monad::mpt::NibblesView(0, length_, buffer_.data());
+    }
+
+    [[nodiscard]] uint8_t length() const
+    {
+        return length_;
+    }
+};
+
 struct MonadSnapshotTraverseMachine : public monad::mpt::TraverseMachine
 {
     unsigned char nibble;
-    monad::mpt::Nibbles path;
+    NibblePath path;
     std::array<uint64_t, MONAD_SNAPSHOT_SHARDS> &account_bytes_written;
     uint64_t account_offset;
     uint64_t (*write)(
         uint64_t shard, monad_snapshot_type, unsigned char const *bytes,
         size_t len, void *user);
     void *user;
+    uint64_t total_shards;
+    uint64_t shard_number;
 
     MonadSnapshotTraverseMachine(
         std::array<uint64_t, MONAD_SNAPSHOT_SHARDS> &account_bytes_written,
         uint64_t (*write)(
             uint64_t shard, monad_snapshot_type, unsigned char const *bytes,
             size_t len, void *user),
-        void *user)
+        void *user, uint64_t const total_shards, uint64_t const shard_number)
         : nibble{monad::mpt::INVALID_BRANCH}
         , path{}
         , account_bytes_written{account_bytes_written}
         , account_offset{std::numeric_limits<uint64_t>::max()}
         , write(write)
         , user{user}
+        , total_shards{total_shards}
+        , shard_number{shard_number}
     {
     }
 
@@ -195,24 +242,38 @@ struct MonadSnapshotTraverseMachine : public monad::mpt::TraverseMachine
         constexpr unsigned HASH_SIZE = KECCAK256_SIZE * 2;
 
         if (branch == INVALID_BRANCH) {
-            MONAD_ASSERT(path.nibble_size() == 0);
+            MONAD_ASSERT(path.length() == 0);
             return true;
         }
-        else if (path.nibble_size() == 0 && nibble == INVALID_BRANCH) {
+        else if (path.length() == 0 && nibble == INVALID_BRANCH) {
             nibble = branch;
             return true;
         }
         MONAD_ASSERT(nibble == STATE_NIBBLE || nibble == CODE_NIBBLE);
 
-        path = concat(NibblesView{path}, branch, node.path_nibble_view());
+        path.append(branch, node.path_nibble_view());
 
+        // Path not long enough to determine shard yet, continue traversing
+        if (path.length() < MONAD_SNAPSHOT_SHARD_NIBBLES) {
+            return true;
+        }
+
+        uint64_t const shard = get_shard(path.view());
+
+        // Return false to skip entire subtree since all descendants have same
+        // shard
+        if (shard % total_shards != shard_number) {
+            return false;
+        }
+
+        // If intermediate node (no value), continue traversing deeper
         if (!node.has_value()) {
             return true;
         }
-        uint64_t const shard = get_shard(path);
+
         byte_string_view const val = node.value();
         if (nibble == CODE_NIBBLE) {
-            MONAD_ASSERT(path.nibble_size() == HASH_SIZE);
+            MONAD_ASSERT(path.length() == HASH_SIZE);
             uint64_t const len = val.size();
             MONAD_ASSERT(
                 write(
@@ -228,13 +289,13 @@ struct MonadSnapshotTraverseMachine : public monad::mpt::TraverseMachine
         else {
             MONAD_ASSERT(nibble == STATE_NIBBLE);
             monad_snapshot_type type;
-            if (path.nibble_size() == HASH_SIZE) {
+            if (path.length() == HASH_SIZE) {
                 type = MONAD_SNAPSHOT_ACCOUNT;
                 account_offset = account_bytes_written.at(shard);
                 account_bytes_written.at(shard) += val.size();
             }
             else {
-                MONAD_ASSERT(path.nibble_size() == (HASH_SIZE * 2));
+                MONAD_ASSERT(path.length() == (HASH_SIZE * 2));
                 type = MONAD_SNAPSHOT_STORAGE;
                 MONAD_ASSERT(
                     write(
@@ -255,12 +316,12 @@ struct MonadSnapshotTraverseMachine : public monad::mpt::TraverseMachine
 
     virtual void up(unsigned char const, monad::mpt::Node const &node) override
     {
-        if (path.nibble_size() == 0) {
+        if (path.length() == 0) {
             nibble = monad::mpt::INVALID_BRANCH;
             return;
         }
-        monad::mpt::NibblesView const view{path};
-        path = view.substr(0, view.nibble_size() - 1 - node.path_nibbles_len());
+        // Remove branch nibble + node path nibbles that were added in down()
+        path.pop(static_cast<uint8_t>(1 + node.path_nibbles_len()));
     }
 
     virtual std::unique_ptr<TraverseMachine> clone() const override
@@ -273,7 +334,7 @@ struct MonadSnapshotTraverseMachine : public monad::mpt::TraverseMachine
     {
         using namespace monad;
         using namespace monad::mpt;
-        if (path.nibble_size() == 0 && nibble == INVALID_BRANCH) {
+        if (path.length() == 0 && nibble == INVALID_BRANCH) {
             MONAD_ASSERT(branch != INVALID_BRANCH);
             return branch == STATE_NIBBLE || branch == CODE_NIBBLE;
         }
@@ -296,20 +357,38 @@ bool monad_db_dump_snapshot(
     uint64_t (*write)(
         uint64_t shard, monad_snapshot_type, unsigned char const *bytes,
         size_t len, void *user),
-    void *const user)
+    void *const user, unsigned const dump_concurrency_limit,
+    uint64_t const total_shards, uint64_t const shard_number)
 {
     using namespace monad;
     using namespace monad::mpt;
 
+    MONAD_ASSERT_PRINTF(
+        total_shards >= 1, "total_shards must be >= 1, got %lu", total_shards);
+    MONAD_ASSERT_PRINTF(
+        shard_number < total_shards,
+        "shard_number (%lu) must be < total_shards (%lu)",
+        shard_number,
+        total_shards);
+
+    // Set all queue sizes to dump_concurrency_limit to avoid double queuing
     ReadOnlyOnDiskDbConfig const config{
+        .rd_buffers = dump_concurrency_limit,
+        .uring_entries = dump_concurrency_limit,
         .sq_thread_cpu = sq_thread_cpu != std::numeric_limits<unsigned>::max()
                              ? std::make_optional(sq_thread_cpu)
                              : std::nullopt,
-        .dbname_paths = {dbname_paths, dbname_paths + len}};
+        .dbname_paths = {dbname_paths, dbname_paths + len},
+        .concurrent_read_io_limit = dump_concurrency_limit};
     AsyncIOContext io_context{config};
     Db db{io_context};
 
     for (uint64_t b = block < 256 ? 0 : block - 255; b <= block; ++b) {
+        uint64_t const header_shard = block - b;
+        if (header_shard % total_shards != shard_number) {
+            continue;
+        }
+
         auto const header_cursor_res = db.find(
             concat(FINALIZED_NIBBLE, NibblesView{block_header_nibbles}), b);
         if (!header_cursor_res.has_value()) {
@@ -322,7 +401,7 @@ bool monad_db_dump_snapshot(
         auto const header_view = header_cursor_res.value().node->value();
         MONAD_ASSERT(
             write(
-                block - b,
+                header_shard,
                 MONAD_SNAPSHOT_ETH_HEADER,
                 header_view.data(),
                 header_view.size(),
@@ -348,8 +427,10 @@ bool monad_db_dump_snapshot(
     }
 
     std::array<uint64_t, MONAD_SNAPSHOT_SHARDS> account_bytes_written{};
-    MonadSnapshotTraverseMachine machine{account_bytes_written, write, user};
-    bool const success = db.traverse(finalized_root, machine, block);
+    MonadSnapshotTraverseMachine machine{
+        account_bytes_written, write, user, total_shards, shard_number};
+    bool const success =
+        db.traverse(finalized_root, machine, block, dump_concurrency_limit);
     if (!success) {
         LOG_INFO("db traverse for block {} unsuccessful", block);
     }

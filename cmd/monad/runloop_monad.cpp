@@ -44,6 +44,7 @@
 #include <category/execution/monad/core/monad_block.hpp>
 #include <category/execution/monad/core/rlp/monad_block_rlp.hpp>
 #include <category/execution/monad/event/record_consensus_events.hpp>
+#include <category/execution/monad/reserve_balance.hpp>
 #include <category/execution/monad/validate_monad_block.hpp>
 #include <category/mpt/db.hpp>
 #include <category/vm/evm/switch_traits.hpp>
@@ -293,14 +294,12 @@ Result<BlockExecOutput> propose_block(
             block_metrics,
             call_tracers,
             state_tracers,
-            [&chain, &block, &chain_context](
+            [&block, &chain_context](
                 Address const &sender,
                 Transaction const &tx,
                 uint64_t const i,
                 State &state) {
-                return chain.revert_transaction(
-                    block.header.number,
-                    block.header.timestamp,
+                return revert_monad_transaction<traits>(
                     sender,
                     tx,
                     block.header.base_fee_per_gas.value_or(0),
@@ -629,6 +628,9 @@ Result<std::pair<uint64_t, uint64_t>> runloop_monad(
                 auto const &header) -> Result<std::pair<uint64_t, uint64_t>> {
             auto const block_time_start = std::chrono::steady_clock::now();
 
+            db.update_voted_metadata(header.seqno - 1, header.parent_id());
+            record_block_qc(header, last_finalized_block_number);
+
             uint64_t const block_number = header.execution_inputs.number;
             auto body = read_body(header.block_body_id, body_dir);
             auto const ntxns = body.transactions.size();
@@ -642,7 +644,6 @@ Result<std::pair<uint64_t, uint64_t>> runloop_monad(
                 monad_block_input.base_fee_moment = header.base_fee_moment;
             };
 
-            record_block_qc(header, last_finalized_block_number);
             record_block_start(
                 block_id,
                 chain_id,
@@ -685,7 +686,6 @@ Result<std::pair<uint64_t, uint64_t>> runloop_monad(
                 record_block_result(propose_dispatch()));
 
             db.update_proposed_metadata(header.seqno, block_id);
-            db.update_voted_metadata(header.seqno - 1, header.parent_id());
 
             log_tps(
                 block_number,
