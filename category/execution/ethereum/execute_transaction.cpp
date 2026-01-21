@@ -126,11 +126,11 @@ uint64_t ExecuteTransactionNoValidation<traits>::process_authorizations(
             continue;
         }
 
-        static constexpr auto secp256k1_order =
-            0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141_u256;
-        if (auth_entry.sc.s > secp256k1_order / 2) {
-            continue;
-        }
+        // Safety: if an authority has a value here, it must have been produced
+        // by `recover_authority`, which rejects signatures that are not EIP-2
+        // compliant. It is an invariant that non-nullopt auth entries have
+        // signatures with lower-half s components.
+        MONAD_ASSERT(!auth_entry.sc.has_upper_s());
 
         // 4. Add authority to accessed_addresses, as defined in EIP-2929.
         state.access_account(*authority);
@@ -188,7 +188,9 @@ uint64_t ExecuteTransactionNoValidation<traits>::process_authorizations(
 }
 
 template <Traits traits>
-evmc_message ExecuteTransactionNoValidation<traits>::to_message() const
+evmc_message ExecuteTransactionNoValidation<traits>::to_message(
+    vm::MemoryPool::Ref &msg_memory,
+    std::uint32_t const msg_memory_capacity) const
 {
     auto const to_address = [this] {
         if (tx_.to) {
@@ -209,8 +211,9 @@ evmc_message ExecuteTransactionNoValidation<traits>::to_message() const
         .value = {},
         .create2_salt = {},
         .code_address = to_address.second,
-        .code = nullptr, // TODO
-        .code_size = 0, // TODO
+        .memory_handle = msg_memory.get(),
+        .memory = msg_memory.get(),
+        .memory_capacity = msg_memory_capacity,
     };
     intx::be::store(msg.value.bytes, tx_.value);
     return msg;
@@ -249,7 +252,8 @@ evmc::Result ExecuteTransactionNoValidation<traits>::operator()(
         state.access_account(*tx_.to);
     }
 
-    auto msg = to_message();
+    auto msg_memory = state.vm().message_memory_ref();
+    auto msg = to_message(msg_memory, state.vm().message_memory_capacity());
 
     // EIP-7702
     if constexpr (traits::evm_rev() >= EVMC_PRAGUE) {
@@ -427,7 +431,7 @@ Result<Receipt> ExecuteTransaction<traits>::operator()()
             return receipt;
         }
     }
-    block_metrics_.inc_retries();
+    ++block_metrics_.num_retries;
     {
         TRACE_TXN_EVENT(StartRetry);
 

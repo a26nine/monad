@@ -119,7 +119,7 @@ Result<Receipt> ExecuteSystemTransaction<traits>::operator()()
             return receipt;
         }
     }
-    block_metrics_.inc_retries();
+    ++block_metrics_.num_retries;
     {
         TRACE_TXN_EVENT(StartRetry);
 
@@ -142,6 +142,8 @@ Result<Receipt> ExecuteSystemTransaction<traits>::operator()()
 template <Traits traits>
 evmc_message ExecuteSystemTransaction<traits>::to_message() const
 {
+    // System transactions currently do not need a pointer to vm memory,
+    // so the `memory*` fields are zero initialized:
     evmc_message msg{
         .kind = EVMC_CALL,
         .flags = 0,
@@ -154,8 +156,9 @@ evmc_message ExecuteSystemTransaction<traits>::to_message() const
         .value = {},
         .create2_salt = {},
         .code_address = *tx_.to,
-        .code = nullptr,
-        .code_size = 0,
+        .memory_handle = nullptr,
+        .memory = nullptr,
+        .memory_capacity = 0,
     };
     intx::be::store(msg.value.bytes, tx_.value);
     return msg;

@@ -148,6 +148,7 @@ add_library(
   "rlp/config.hpp"
   "rlp/encode.hpp"
   # runtime
+  "runtime/non_temporal_memory.hpp"
   "runtime/uint256.cpp"
   "runtime/uint256.hpp"
   # test
@@ -162,6 +163,8 @@ if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
     PRIVATE # core
             "cpuset.c"
             "cpuset.h"
+            # event
+            "event/event_ring_util_linux.c"
             # io
             "io/buffers.cpp"
             "io/buffers.hpp"

@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <iomanip>
 #include <random>
 #include <regex>
 
@@ -34,11 +35,25 @@ using namespace monad::vm::utils::evm_as;
 
 using traits = EvmTraits<EVMC_OSAKA>;
 
+enum class OutputFormat
+{
+    List,
+    Org,
+    Markdown
+};
+
+std::map<std::string, OutputFormat> const format_map = {
+    {"list", OutputFormat::List},
+    {"org", OutputFormat::Org},
+    {"md", OutputFormat::Markdown}};
+
 struct CommandArguments
 {
     std::vector<std::string> title_filters;
     std::vector<std::string> impl_filters;
     std::vector<std::string> seq_filters;
+    OutputFormat format = OutputFormat::List;
+    bool verbose = false;
 };
 
 static CommandArguments parse_command_arguments(int argc, char **argv)
@@ -52,6 +67,10 @@ static CommandArguments parse_command_arguments(int argc, char **argv)
         "--impl-filter", args.impl_filters, "VM implementation regex");
     app.add_option(
         "--seq-filter", args.seq_filters, "Instruction sequence regex");
+    app.add_option("--format", args.format, "Output format: list, org, md")
+        ->transform(CLI::CheckedTransformer(format_map, CLI::ignore_case));
+    app.add_flag(
+        "--verbose", args.verbose, "Print benchmark progress information");
 
     try {
         app.parse(argc, argv);
@@ -95,8 +114,209 @@ struct Benchmark
     CalldataGenerator calldata_generate;
 };
 
+struct SeqResult
+{
+    std::string subj_seq;
+    double baseline;
+    double best;
+    double delta;
+    std::chrono::steady_clock::rep total;
+};
+
+struct BenchmarkResult
+{
+    std::string impl;
+    std::string title;
+    std::string base_seq;
+    std::vector<SeqResult> results;
+
+    void add(SeqResult res)
+    {
+        std::replace(res.subj_seq.begin(), res.subj_seq.end(), '\n', ';');
+        results.push_back(res);
+    }
+
+    bool empty() const
+    {
+        return results.empty();
+    }
+};
+
+// Table formatting for Org-mode and Markdown output
+class TableFormatter
+{
+    struct ColumnSpec
+    {
+        std::string name;
+        size_t width;
+        bool left_align;
+    };
+
+    static inline size_t const default_seq_width = 10;
+
+    std::vector<ColumnSpec> columns_{
+        {.name = "Subj Seq", .width = default_seq_width, .left_align = true},
+        {.name = "Baseline (ms)", .width = 13, .left_align = false},
+        {.name = "Best (ms)", .width = 10, .left_align = false},
+        {.name = "Seq Delta (ns)", .width = 14, .left_align = false},
+        {.name = "Total (ms)", .width = 10, .left_align = false},
+    };
+
+    OutputFormat format_;
+
+public:
+    explicit TableFormatter(OutputFormat format)
+        : format_{format}
+    {
+    }
+
+    void compute_column_widths(BenchmarkResult const &r)
+    {
+        columns_[0].width = default_seq_width;
+
+        for (auto const &seq : r.results) {
+            columns_[0].width =
+                std::max(columns_[0].width, seq.subj_seq.length());
+        }
+
+        // Ensure column is at least as wide as the header
+        columns_[0].width =
+            std::max(columns_[0].width, columns_[0].name.length());
+    }
+
+    void print_header(BenchmarkResult const &r)
+    {
+        std::cout << r.impl << "\n\t" << r.title << "\n\nBaseline sequence\n"
+                  << r.base_seq << "\nResults\n";
+
+        print_table_header();
+    }
+
+    void print_table_header()
+    {
+        for (auto const &col : columns_) {
+            std::cout << "| " << std::setw(static_cast<int>(col.width))
+                      << (col.left_align ? std::left : std::right) << col.name
+                      << " ";
+        }
+        std::cout << "|" << std::endl;
+
+        print_separator_line();
+    }
+
+    void print_separator_line()
+    {
+        if (format_ == OutputFormat::Org) {
+            // Org-mode: |---+---+---|
+            std::cout << "|";
+            for (size_t i = 0; i < columns_.size(); ++i) {
+                std::cout << std::string(columns_[i].width + 2, '-');
+                std::cout << (i < columns_.size() - 1 ? "+" : "|");
+            }
+            std::cout << std::endl;
+        }
+        else {
+            // Markdown: | :--- | ---: |
+            for (auto const &col : columns_) {
+                std::cout << "| ";
+                if (col.left_align) {
+                    std::cout << ":";
+                    std::cout << std::string(col.width - 1, '-');
+                    std::cout << " ";
+                }
+                else {
+                    std::cout << std::string(col.width - 1, '-');
+                    std::cout << ": ";
+                }
+            }
+            std::cout << "|" << std::endl;
+        }
+    }
+
+    void print_row(SeqResult const &s)
+    {
+        std::cout << "| " << std::left
+                  << std::setw(static_cast<int>(columns_[0].width))
+                  << s.subj_seq << " ";
+
+        std::cout << std::right << std::fixed << std::setprecision(6);
+
+        std::cout << "| " << std::setw(static_cast<int>(columns_[1].width))
+                  << s.baseline << " ";
+
+        std::cout << "| " << std::setw(static_cast<int>(columns_[2].width))
+                  << s.best << " ";
+
+        std::cout << std::setprecision(5);
+        std::cout << "| " << std::setw(static_cast<int>(columns_[3].width))
+                  << s.delta << " ";
+
+        std::cout << "| " << std::setw(static_cast<int>(columns_[4].width))
+                  << s.total << " ";
+
+        std::cout << "|" << std::endl;
+    }
+
+    void print_benchmark(BenchmarkResult const &r)
+    {
+        if (r.empty()) {
+            return;
+        }
+
+        compute_column_widths(r);
+        print_header(r);
+
+        for (auto const &seq : r.results) {
+            print_row(seq);
+        }
+        std::cout << std::endl;
+    }
+};
+
+class ListFormatter
+{
+public:
+    void print_benchmark(BenchmarkResult const &r)
+    {
+        if (r.empty()) {
+            return;
+        }
+
+        std::cout << r.impl << "\n\t" << r.title << "\n\nBaseline sequence\n"
+                  << r.base_seq << "\nResults\n";
+
+        for (auto const &s : r.results) {
+            std::cout << s.subj_seq << "\n"
+                      << std::fixed << std::setprecision(6)
+                      << "\tbaseline:  " << s.baseline << " ms\n"
+                      << "\tbest:      " << s.best << " ms\n"
+                      << std::setprecision(5) << "\tseq delta: " << s.delta
+                      << " ns\n"
+                      << "\ttotal:     " << s.total << " ms\n";
+        }
+        std::cout << std::endl;
+    }
+};
+
+static void
+print_results(std::vector<BenchmarkResult> const &results, OutputFormat format)
+{
+    if (format == OutputFormat::List) {
+        ListFormatter formatter;
+        for (auto const &r : results) {
+            formatter.print_benchmark(r);
+        }
+    }
+    else {
+        TableFormatter formatter(format);
+        for (auto const &r : results) {
+            formatter.print_benchmark(r);
+        }
+    }
+}
+
 static double execute_iteration(
-    evmc::VM &vm, evmc::address const &code_address,
+    evmc::VM &vm, MemoryPool &memory_pool, evmc::address const &code_address,
     std::vector<uint8_t> const &bytecode, test::KernelCalldata const &calldata)
 {
     evmc::address sender_address{200};
@@ -133,6 +353,7 @@ static double execute_iteration(
     auto const *interface = &host.get_interface();
     auto *ctx = host.to_context();
 
+    auto msg_memory = memory_pool.alloc_ref();
     evmc_message msg{
         .kind = EVMC_CALL,
         .flags = 0,
@@ -145,8 +366,9 @@ static double execute_iteration(
         .value = {},
         .create2_salt = {},
         .code_address = code_address,
-        .code = bytecode.data(),
-        .code_size = bytecode.size(),
+        .memory_handle = msg_memory.get(),
+        .memory = msg_memory.get(),
+        .memory_capacity = memory_pool.alloc_capacity(),
     };
 
     auto const start = std::chrono::steady_clock::now();
@@ -167,7 +389,8 @@ static double execute_iteration(
 }
 
 static std::pair<double, double> execute_against_base(
-    evmc::VM &vm, evmc::address const &base_code_address,
+    evmc::VM &vm, MemoryPool &memory_pool,
+    evmc::address const &base_code_address,
     std::vector<uint8_t> const &base_bytecode,
     test::KernelCalldata const &base_calldata,
     evmc::address const &code_address, std::vector<uint8_t> const &bytecode,
@@ -176,33 +399,36 @@ static std::pair<double, double> execute_against_base(
     for (uint32_t i = 0; i < (iteration_count >> 4) + 1; ++i) {
         // warmup
         (void)execute_iteration(
-            vm, base_code_address, base_bytecode, base_calldata);
-        (void)execute_iteration(vm, code_address, bytecode, calldata);
+            vm, memory_pool, base_code_address, base_bytecode, base_calldata);
+        (void)execute_iteration(
+            vm, memory_pool, code_address, bytecode, calldata);
     }
 
     double base_best = std::numeric_limits<double>::max();
     double best = std::numeric_limits<double>::max();
     for (size_t i = 0; i < iteration_count; ++i) {
         auto const base_t = execute_iteration(
-            vm, base_code_address, base_bytecode, base_calldata);
+            vm, memory_pool, base_code_address, base_bytecode, base_calldata);
         base_best = std::min(base_t, base_best);
-        auto const t = execute_iteration(vm, code_address, bytecode, calldata);
+        auto const t = execute_iteration(
+            vm, memory_pool, code_address, bytecode, calldata);
         best = std::min(t, best);
     }
     return {base_best, best};
 }
 
-static void run_implementation_benchmark(
+static std::optional<BenchmarkResult> run_implementation_benchmark(
     CommandArguments const &args, BlockchainTestVM::Implementation impl,
-    Benchmark const &bench)
+    MemoryPool &memory_pool, Benchmark const &bench)
 {
     auto *bvm = new BlockchainTestVM{impl};
     auto vm = evmc::VM(bvm);
 
-    auto const impl_name = BlockchainTestVM::impl_name(bvm->implementation());
+    auto const impl_name =
+        std::string{BlockchainTestVM::impl_name(bvm->implementation())};
 
-    if (!filter_search(std::string{impl_name}, args.impl_filters)) {
-        return;
+    if (!filter_search(impl_name, args.impl_filters)) {
+        return {};
     }
 
     uint256_t code_address{1000};
@@ -219,7 +445,8 @@ static void run_implementation_benchmark(
     compile(bench.assemble(bench.baseline_seq), base_bytecode);
     auto const base_calldata = bench.calldata_generate(bench.baseline_seq);
 
-    bool is_title_printed = false;
+    BenchmarkResult res{
+        .impl = impl_name, .title = bench.title, .base_seq = base_name};
     auto const seq_count = static_cast<double>(bench.sequence_count);
 
     for (size_t i = 0; i < bench.subject_seqs.size(); ++i) {
@@ -229,13 +456,6 @@ static void run_implementation_benchmark(
         auto const name = mcompile(seq);
         if (!filter_search(name, args.seq_filters)) {
             continue;
-        }
-
-        if (!is_title_printed) {
-            std::cout << impl_name << "\n\t" << bench.title
-                      << "\n\nBaseline sequence\n"
-                      << base_name << "\nResults\n";
-            is_title_printed = true;
         }
 
         code_address = code_address + 1;
@@ -253,6 +473,7 @@ static void run_implementation_benchmark(
 
         auto const [base_time, time] = execute_against_base(
             vm,
+            memory_pool,
             address_from_uint256(base_code_address),
             base_bytecode,
             base_calldata,
@@ -263,18 +484,15 @@ static void run_implementation_benchmark(
 
         auto const stop = std::chrono::steady_clock::now();
 
-        std::cout << name << "\tbaseline:  " << (base_time / 1'000'000)
-                  << " ms\n"
-                  << "\tbest:      " << (time / 1'000'000) << " ms\n"
-                  << "\tseq delta: " << ((time - base_time) / seq_count)
-                  << " ns\n"
-                  << "\ttotal:     " << ((stop - start).count() / 1'000'000)
-                  << " ms\n";
+        res.add(
+            {.subj_seq = name,
+             .baseline = base_time / 1'000'000,
+             .best = time / 1'000'000,
+             .delta = ((time - base_time) / seq_count),
+             .total = ((stop - start).count() / 1'000'000)});
     }
 
-    if (is_title_printed) {
-        std::cout << '\n';
-    }
+    return res;
 }
 
 using enum BlockchainTestVM::Implementation;
@@ -288,13 +506,27 @@ static BlockchainTestVM::Implementation const all_impls[] = {
 #endif
 };
 
-static void run_benchmark(CommandArguments const &args, Benchmark const &bench)
+static void run_benchmark(
+    CommandArguments const &args, std::vector<BenchmarkResult> &results,
+    MemoryPool &memory_pool, Benchmark const &bench)
 {
     if (!filter_search(bench.title, args.title_filters)) {
         return;
     }
+    if (args.verbose) {
+        std::cout << bench.title << "...";
+    }
     for (auto const impl : all_impls) {
-        run_implementation_benchmark(args, impl, bench);
+        if (auto res =
+                run_implementation_benchmark(args, impl, memory_pool, bench)) {
+            if (args.verbose) {
+                std::cout << res.value().impl << "...";
+            }
+            results.push_back(res.value());
+        }
+    }
+    if (args.verbose) {
+        std::cout << std::endl;
     }
 }
 
@@ -377,6 +609,7 @@ struct BenchmarkBuilderData
     size_t num_inputs;
     bool has_output;
     size_t iteration_count;
+    std::optional<EvmBuilder<traits>> baseline_seq = std::nullopt;
     std::vector<EvmBuilder<traits>> subject_seqs;
     std::optional<std::vector<EvmBuilder<traits>>> effect_free_subject_seqs =
         std::nullopt;
@@ -384,14 +617,19 @@ struct BenchmarkBuilderData
 
 struct BenchmarkBuilder
 {
-    BenchmarkBuilder(CommandArguments const &args, BenchmarkBuilderData data)
+    BenchmarkBuilder(
+        CommandArguments const &args, std::vector<BenchmarkResult> &results,
+        BenchmarkBuilderData data)
         : command_arguments_{args}
+        , results_{results}
         , title_{std::move(data.title)}
         , num_inputs_{data.num_inputs}
         , has_output_{data.has_output}
         , iteration_count_{data.iteration_count}
+        , baseline_seq_{std::move(data.baseline_seq)}
         , subject_seqs_{std::move(data.subject_seqs)}
         , effect_free_subject_seqs_{std::move(data.effect_free_subject_seqs)}
+        , memory_pool_{100 * 1024} // arbitrary 100 kB alloc capacity
     {
     }
 
@@ -407,13 +645,16 @@ struct BenchmarkBuilder
 
 private:
     CommandArguments command_arguments_;
+    std::vector<BenchmarkResult> &results_;
     std::string title_;
     size_t num_inputs_;
     bool has_output_;
     size_t iteration_count_;
+    std::optional<EvmBuilder<traits>> baseline_seq_;
     std::vector<EvmBuilder<traits>> subject_seqs_;
     std::optional<std::vector<EvmBuilder<traits>>> effect_free_subject_seqs_;
     std::vector<uint8_t> calldata_;
+    MemoryPool memory_pool_;
 };
 
 BenchmarkBuilder &BenchmarkBuilder::run_throughput_benchmark()
@@ -432,12 +673,15 @@ BenchmarkBuilder &BenchmarkBuilder::run_throughput_benchmark()
 
     run_benchmark(
         command_arguments_,
+        results_,
+        memory_pool_,
         Benchmark{
             .title = title_ + ", throughput",
             .num_inputs = num_inputs_,
             .has_output = has_output_,
             .iteration_count = iteration_count_,
-            .baseline_seq = std::move(base_builder),
+            .baseline_seq = baseline_seq_.has_value() ? *baseline_seq_
+                                                      : std::move(base_builder),
             .subject_seqs = subject_seqs_,
             .effect_free_subject_seqs = effect_free_subject_seqs_,
             .sequence_count = KB::get_sequence_repetition_count(
@@ -475,12 +719,15 @@ BenchmarkBuilder &BenchmarkBuilder::run_latency_benchmark()
 
     run_benchmark(
         command_arguments_,
+        results_,
+        memory_pool_,
         Benchmark{
             .title = title_ + ", latency",
             .num_inputs = num_inputs_,
             .has_output = has_output_,
             .iteration_count = iteration_count_,
-            .baseline_seq = std::move(base_builder),
+            .baseline_seq = baseline_seq_.has_value() ? *baseline_seq_
+                                                      : std::move(base_builder),
             .subject_seqs = subject_seqs_,
             .effect_free_subject_seqs = effect_free_subject_seqs_,
             .sequence_count = KB::get_sequence_repetition_count(
@@ -504,9 +751,11 @@ BenchmarkBuilder &BenchmarkBuilder::run_latency_benchmark()
 int main(int argc, char **argv)
 {
     auto const args = parse_command_arguments(argc, argv);
+    std::vector<BenchmarkResult> results;
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BASIC_UNA_MATH, constant input",
          .num_inputs = 1,
          .has_output = true,
@@ -520,6 +769,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "DUP2; MSTORE; MLOAD, constant input",
          .num_inputs = 2,
          .has_output = true,
@@ -539,6 +789,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "DUP2; MSTORE; MLOAD, increasing input",
          .num_inputs = 2,
          .has_output = true,
@@ -559,6 +810,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BASIC_BIN_MATH, constant input",
          .num_inputs = 2,
          .has_output = true,
@@ -572,6 +824,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "EXP, random input",
          .num_inputs = 2,
          .has_output = true,
@@ -588,6 +841,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BYTE/SIGNEXTEND, random input",
          .num_inputs = 2,
          .has_output = true,
@@ -606,6 +860,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BYTE/SIGNEXTEND, constant input",
          .num_inputs = 2,
          .has_output = true,
@@ -624,6 +879,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "PUSH 23; SIGNEXTEND, constant input",
          .num_inputs = 1,
          .has_output = true,
@@ -642,6 +898,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "PUSH 1; XOR; PUSH 23; SIGNEXTEND, constant input",
          .num_inputs = 1,
          .has_output = true,
@@ -661,6 +918,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "SHIFT, random input",
          .num_inputs = 2,
          .has_output = true,
@@ -679,6 +937,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "SHIFT, constant input",
          .num_inputs = 2,
          .has_output = true,
@@ -697,6 +956,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BASIC_TERN_MATH, random input",
          .num_inputs = 3,
          .has_output = true,
@@ -714,6 +974,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BASIC_BIN_MATH; BASIC_BIN_MATH, constant input",
          .num_inputs = 3,
          .has_output = true,
@@ -727,6 +988,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BASIC_UNA_MATH; BASIC_BIN_MATH, constant input",
          .num_inputs = 2,
          .has_output = true,
@@ -740,6 +1002,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BASIC_BIN_MATH; BASIC_UNA_MATH, constant input",
          .num_inputs = 2,
          .has_output = true,
@@ -753,6 +1016,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "SHIFT; BASIC_BIN_MATH, constant input",
          .num_inputs = 3,
          .has_output = true,
@@ -770,6 +1034,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "SHIFT; SWAP1; BASIC_BIN_MATH, constant input",
          .num_inputs = 3,
          .has_output = true,
@@ -789,6 +1054,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BASIC_BIN_MATH; SHIFT, constant input",
          .num_inputs = 3,
          .has_output = true,
@@ -808,6 +1074,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BASIC_BIN_MATH; SWAP1; SHIFT, constant input",
          .num_inputs = 3,
          .has_output = true,
@@ -829,6 +1096,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BYTE/SIGNEXTEND; BASIC_BIN_MATH, constant input",
          .num_inputs = 3,
          .has_output = true,
@@ -846,6 +1114,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BYTE/SIGNEXTEND; SWAP1; BASIC_BIN_MATH, constant input",
          .num_inputs = 3,
          .has_output = true,
@@ -865,6 +1134,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BASIC_BIN_MATH; BYTE/SIGNEXTEND, constant input",
          .num_inputs = 3,
          .has_output = true,
@@ -884,6 +1154,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "BASIC_BIN_MATH; SWAP1; BYTE/SIGNEXTEND, constant input",
          .num_inputs = 3,
          .has_output = true,
@@ -905,6 +1176,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "CREATE, constant input",
          .num_inputs = 3,
          .has_output = true,
@@ -923,6 +1195,7 @@ int main(int argc, char **argv)
 
     BenchmarkBuilder(
         args,
+        results,
         {.title = "CALL, constant input",
          .num_inputs = 7,
          .has_output = true,
@@ -942,4 +1215,90 @@ int main(int argc, char **argv)
             return cd;
         })
         .run_throughput_benchmark();
+
+    BenchmarkBuilder(
+        args,
+        results,
+        {.title = "store forwarding stall, constant input",
+         .num_inputs = 2,
+         .has_output = true,
+         .iteration_count = 100,
+         .baseline_seq = KernelBuilder<traits>{}
+                             .dup2()
+                             .dup2()
+                             .add()
+                             .dup3()
+                             .dup3()
+                             .add()
+                             .dup4()
+                             .dup4()
+                             .add()
+                             .dup5()
+                             .dup5()
+                             .add()
+                             .dup6()
+                             .dup6()
+                             .add()
+                             .dup7()
+                             .dup7()
+                             .add()
+                             .dup8()
+                             .dup8()
+                             .add()
+                             .dup7()
+                             .dup5()
+                             .add()
+                             .add()
+                             .add()
+                             .add()
+                             .add()
+                             .add()
+                             .add()
+                             .add()
+                             .add()
+                             .add(),
+         .subject_seqs = {KernelBuilder<traits>{}
+                              .dup2()
+                              .dup2()
+                              .add()
+                              .dup3()
+                              .dup3()
+                              .add()
+                              .dup4()
+                              .dup4()
+                              .add()
+                              .dup5()
+                              .dup5()
+                              .add()
+                              .dup6()
+                              .dup6()
+                              .add()
+                              .dup7()
+                              .dup7()
+                              .add()
+                              .dup8()
+                              .dup8()
+                              .add()
+                              .dup7()
+                              .dup5()
+                              .xor_() // add() in the baseline
+                              .add()
+                              .add()
+                              .add()
+                              .add()
+                              .add()
+                              .add()
+                              .add()
+                              .add()
+                              .add()},
+         .effect_free_subject_seqs = {{KernelBuilder<traits>{}.pop()}}})
+        .make_calldata([](size_t num_inputs) {
+            return std::vector<uint8_t>(10'000 * num_inputs * 32, 1);
+        })
+        .run_throughput_benchmark()
+        .run_latency_benchmark();
+
+    print_results(results, args.format);
+
+    return 0;
 }
