@@ -13,11 +13,9 @@ packages=(
   libgmp-dev
   libgtest-dev
   libhugetlbfs-dev
-  libmagicenum-dev
   libtbb-dev
   liburing-dev
   libzstd-dev
 )
 
-apt-get update
-apt-get install -y "${packages[@]}"
+apt-get install -y --no-install-recommends "${packages[@]}"

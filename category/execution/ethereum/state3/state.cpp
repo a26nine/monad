@@ -339,13 +339,6 @@ void State::subtract_from_balance(
     account_state.touch();
 }
 
-void State::set_code_hash(Address const &address, bytes32_t const &hash)
-{
-    auto &account = current_account(address);
-    MONAD_ASSERT(account.has_value());
-    account.value().code_hash = hash;
-}
-
 evmc_storage_status State::set_storage(
     Address const &address, bytes32_t const &key, bytes32_t const &value)
 {
@@ -401,11 +394,13 @@ State::access_storage(Address const &address, bytes32_t const &key)
 }
 
 template <Traits traits>
-bool State::selfdestruct(Address const &address, Address const &beneficiary)
+std::pair<bool, uint256_t>
+State::selfdestruct(Address const &address, Address const &beneficiary)
 {
     auto &account_state = current_account_state(address);
     auto &account = account_state.account_;
     MONAD_ASSERT(account.has_value());
+    auto const initial_balance = account.value().balance;
 
     if constexpr (traits::evm_rev() < EVMC_CANCUN) {
         add_to_balance(beneficiary, account.value().balance);
@@ -420,7 +415,7 @@ bool State::selfdestruct(Address const &address, Address const &beneficiary)
         }
     }
 
-    return account_state.destruct();
+    return {account_state.destruct(), initial_balance};
 }
 
 EXPLICIT_TRAITS_MEMBER(State::selfdestruct);
