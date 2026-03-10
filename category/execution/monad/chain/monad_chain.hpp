@@ -69,4 +69,8 @@ struct MonadChain : Chain
         std::span<std::optional<Address> const> authorities) const override;
 };
 
+ankerl::unordered_dense::segmented_set<Address> combine_senders_and_authorities(
+    std::span<Address const> const,
+    std::span<std::vector<std::optional<Address>> const> const);
+
 MONAD_NAMESPACE_END

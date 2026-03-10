@@ -173,28 +173,6 @@ namespace
     static ankerl::unordered_dense::segmented_set<Address>
         empty_senders_and_authorities{};
 
-    ankerl::unordered_dense::segmented_set<Address>
-    combine_senders_and_authorities(
-        std::vector<Address> const &senders,
-        std::vector<std::vector<std::optional<Address>>> const &authorities)
-    {
-        ankerl::unordered_dense::segmented_set<Address> senders_and_authorities;
-
-        for (Address const &sender : senders) {
-            senders_and_authorities.insert(sender);
-        }
-
-        for (auto const &authorities_ : authorities) {
-            for (std::optional<Address> const &authority : authorities_) {
-                if (authority.has_value()) {
-                    senders_and_authorities.insert(authority.value());
-                }
-            }
-        }
-
-        return senders_and_authorities;
-    }
-
     void apply_state_overrides(
         BlockState &block_state, Incarnation const incarnation,
         monad_state_override const &state_overrides)
@@ -1166,6 +1144,11 @@ struct monad_executor
                     1, std::memory_order_relaxed);
                 fiber_group->executing_count.fetch_add(
                     1, std::memory_order_relaxed);
+                BOOST_SCOPE_EXIT_ALL(&fiber_group)
+                {
+                    fiber_group->executing_count.fetch_sub(
+                        1, std::memory_order_relaxed);
+                };
                 try {
                     auto const chain =
                         [chain_config] -> std::unique_ptr<Chain> {
