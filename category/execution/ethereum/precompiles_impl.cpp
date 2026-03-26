@@ -16,6 +16,7 @@
 #include <category/core/assert.h>
 #include <category/core/byte_string.hpp>
 #include <category/core/bytes.hpp>
+#include <category/core/hex.hpp>
 #include <category/execution/ethereum/precompiles.hpp>
 #include <category/execution/ethereum/precompiles_bls12.hpp>
 #include <category/vm/evm/explicit_traits.hpp>
@@ -33,7 +34,6 @@
 #include <eip4844/eip4844.h>
 
 #include <evmc/evmc.h>
-#include <evmc/hex.hpp>
 
 #include <intx/intx.hpp>
 
@@ -78,7 +78,7 @@ namespace
         constexpr std::string_view v{
             "0x0000000000000000000000000000000000000000000000000000000000001000"
             "73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001"};
-        constexpr auto r = evmc::from_hex<bytes64_t>(v);
+        constexpr auto r = monad::from_hex<bytes64_t>(v);
         static_assert(r.has_value());
         return r.value();
     }
@@ -107,38 +107,32 @@ static inline PrecompileResult silkpre_execute(byte_string_view const input)
 {
     auto const [output, output_size] = Func(input.data(), input.size());
     if (output == nullptr) {
-        MONAD_DEBUG_ASSERT(output_size == 0);
+        MONAD_ASSERT(output_size == 0);
         return {EVMC_PRECOMPILE_FAILURE, nullptr, 0};
     }
     return {EVMC_SUCCESS, output, output_size};
 }
 
 template <Traits traits>
-uint64_t ecrecover_gas_cost(byte_string_view const input)
+uint64_t ecrecover_gas_cost(byte_string_view const)
 {
-    return silkpre_ecrec_gas(
-        input.data(), input.size(), static_cast<int>(traits::evm_rev()));
+    // YP eqn 211
+    return 3'000;
 }
 
 EXPLICIT_EVM_TRAITS(ecrecover_gas_cost);
 
-template <Traits traits>
 uint64_t sha256_gas_cost(byte_string_view const input)
 {
-    return silkpre_sha256_gas(
-        input.data(), input.size(), static_cast<int>(traits::evm_rev()));
+    // YP eqn 223
+    return 60 + 12 * num_words(input.size());
 }
 
-EXPLICIT_TRAITS(sha256_gas_cost);
-
-template <Traits traits>
 uint64_t ripemd160_gas_cost(byte_string_view const input)
 {
-    return silkpre_rip160_gas(
-        input.data(), input.size(), static_cast<int>(traits::evm_rev()));
+    // YP eqn 226
+    return 600 + 120 * num_words(input.size());
 }
-
-EXPLICIT_TRAITS(ripemd160_gas_cost);
 
 uint64_t identity_gas_cost(byte_string_view const input)
 {
@@ -147,19 +141,27 @@ uint64_t identity_gas_cost(byte_string_view const input)
 }
 
 template <Traits traits>
-uint64_t ecadd_gas_cost(byte_string_view const input)
+uint64_t ecadd_gas_cost(byte_string_view const)
 {
-    return silkpre_bn_add_gas(
-        input.data(), input.size(), static_cast<int>(traits::evm_rev()));
+    if constexpr (traits::evm_rev() >= EVMC_ISTANBUL) {
+        return 150; // EIP-1108
+    }
+    else {
+        return 500; // EIP-196
+    }
 }
 
 EXPLICIT_EVM_TRAITS(ecadd_gas_cost);
 
 template <Traits traits>
-uint64_t ecmul_gas_cost(byte_string_view const input)
+uint64_t ecmul_gas_cost(byte_string_view const)
 {
-    return silkpre_bn_mul_gas(
-        input.data(), input.size(), static_cast<int>(traits::evm_rev()));
+    if constexpr (traits::evm_rev() >= EVMC_ISTANBUL) {
+        return 6'000; // EIP-1108
+    }
+    else {
+        return 40'000; // EIP-196
+    }
 }
 
 EXPLICIT_EVM_TRAITS(ecmul_gas_cost);
@@ -167,17 +169,15 @@ EXPLICIT_EVM_TRAITS(ecmul_gas_cost);
 template <Traits traits>
 uint64_t snarkv_gas_cost(byte_string_view const input)
 {
-    return silkpre_snarkv_gas(
-        input.data(), input.size(), static_cast<int>(traits::evm_rev()));
+    return snarkv_gas_cost_ethereum<traits::evm_rev()>(input);
 }
 
 EXPLICIT_EVM_TRAITS(snarkv_gas_cost);
 
 template <Traits traits>
-uint64_t blake2bf_gas_cost(byte_string_view const input)
+std::optional<uint64_t> blake2bf_gas_cost(byte_string_view const input)
 {
-    return silkpre_blake2_f_gas(
-        input.data(), input.size(), static_cast<int>(traits::evm_rev()));
+    return blake2bf_gas_cost_ethereum(input);
 }
 
 EXPLICIT_EVM_TRAITS(blake2bf_gas_cost);

@@ -18,6 +18,7 @@
 #include <category/async/util.hpp>
 #include <category/core/assert.h>
 #include <category/core/byte_string.hpp>
+#include <category/core/hex.hpp>
 #include <category/mpt/config.hpp>
 #include <category/mpt/nibbles_view.hpp>
 
@@ -176,7 +177,7 @@ public:
         virtual_chunk_offset_t const offset)
         : v_{static_cast<uint32_t>(offset.raw() >> bits_to_truncate)}
     {
-        MONAD_DEBUG_ASSERT(offset != INVALID_VIRTUAL_OFFSET);
+        MONAD_ASSERT(offset != INVALID_VIRTUAL_OFFSET);
     }
 
     void set_value(uint32_t v) noexcept
@@ -233,10 +234,38 @@ static constexpr compact_virtual_chunk_offset_t INVALID_COMPACT_VIRTUAL_OFFSET =
 static constexpr compact_virtual_chunk_offset_t MIN_COMPACT_VIRTUAL_OFFSET =
     compact_virtual_chunk_offset_t::min_value();
 
+//! A pair of compact virtual chunk offsets for fast and slow lists.
+struct compact_offset_pair
+{
+    compact_virtual_chunk_offset_t fast{INVALID_COMPACT_VIRTUAL_OFFSET};
+    compact_virtual_chunk_offset_t slow{INVALID_COMPACT_VIRTUAL_OFFSET};
+
+    // Returns true if either component is below the corresponding threshold
+    constexpr bool any_below(compact_offset_pair threshold) const noexcept
+    {
+        return fast < threshold.fast || slow < threshold.slow;
+    }
+
+    // Returns true if the fast component is below the threshold
+    constexpr bool fast_below(compact_offset_pair threshold) const noexcept
+    {
+        return fast < threshold.fast;
+    }
+
+    byte_string serialize() const;
+
+    constexpr bool
+    operator==(compact_offset_pair const &) const noexcept = default;
+};
+
+static_assert(sizeof(compact_offset_pair) == 8);
+static_assert(alignof(compact_offset_pair) == 4);
+
 inline constexpr unsigned
 bitmask_index(uint16_t const mask, unsigned const i) noexcept
 {
-    MONAD_DEBUG_ASSERT(i < 16);
+    MONAD_ASSERT(i < 16);
+    MONAD_ASSERT(mask & (1u << i));
     uint16_t const filter = UINT16_MAX >> (16 - i);
     return static_cast<unsigned>(
         std::popcount(static_cast<uint16_t>(mask & filter)));
@@ -293,6 +322,12 @@ inline byte_string serialize(V n)
     static_assert(std::endian::native == std::endian::little);
     auto arr = std::bit_cast<std::array<unsigned char, sizeof(V)>>(n);
     return byte_string{arr.data(), arr.size()};
+}
+
+inline byte_string compact_offset_pair::serialize() const
+{
+    return ::monad::mpt::serialize((uint32_t)fast) +
+           ::monad::mpt::serialize((uint32_t)slow);
 }
 
 MONAD_MPT_NAMESPACE_END

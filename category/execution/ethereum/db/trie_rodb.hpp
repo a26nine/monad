@@ -23,7 +23,7 @@
 #include <category/mpt/db_error.hpp>
 #include <category/vm/vm.hpp>
 
-#include <evmc/hex.hpp>
+#include <category/core/hex.hpp>
 
 #include <memory>
 #include <optional>
@@ -59,7 +59,7 @@ public:
                     ::monad::mpt::DbError::version_no_longer_exist,
                 "Cannot find block_id %s prefix at block %lu where block is "
                 "still valid in db",
-                evmc::hex(to_byte_string_view(block_id.bytes)).c_str(),
+                to_hex(to_byte_string_view(block_id.bytes)).c_str(),
                 block_number);
             MONAD_ASSERT_THROW(
                 res.has_value(),
@@ -86,7 +86,6 @@ public:
         }
         auto encoded_account = acc_leaf_res.value().node->value();
         auto const acct = decode_account_db_ignore_address(encoded_account);
-        MONAD_DEBUG_ASSERT(!acct.has_error());
         return acct.value();
     }
 

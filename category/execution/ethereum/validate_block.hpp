@@ -73,9 +73,6 @@ template <Traits traits>
 Result<void> static_validate_block(Chain const &chain, Block const &);
 
 Result<void>
-static_validate_block(evmc_revision, Chain const &chain, Block const &);
-
-Result<void>
 validate_output_header(BlockHeader const &input, BlockHeader const &output);
 
 MONAD_NAMESPACE_END

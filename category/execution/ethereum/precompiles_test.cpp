@@ -13,6 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include <category/core/hex.hpp>
 #include <category/execution/ethereum/core/address.hpp>
 #include <category/execution/ethereum/precompiles.hpp>
 #include <category/execution/ethereum/state2/block_state.hpp>
@@ -22,7 +23,6 @@
 
 #include <evmc/evmc.h>
 #include <evmc/evmc.hpp>
-#include <evmc/hex.hpp>
 
 #include <gtest/gtest.h>
 
@@ -33,7 +33,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include "test_resource_data.h"
@@ -49,7 +51,7 @@ namespace
     // the following elliptic curve input data was directly copied from
     // https://github.com/ethereum/go-ethereum/tree/master/core/vm/testdata/precompiles
     static auto const ECRECOVER_UNRECOVERABLE_KEY_INPUT =
-        evmc::from_hex(
+        from_hex(
             std::string_view{
                 "a8b53bdf3306a35a7103ab5504a0c9b492295564b6202b1942a84ef3001072"
                 "81000000000000000000000000000000000000000000000000000000000000"
@@ -60,7 +62,7 @@ namespace
             .value();
 
     static auto const ECRECOVER_VALID_KEY_INPUT =
-        evmc::from_hex(
+        from_hex(
             std::string_view{
                 "18c547e4f7b0f325ad1e56f57e26c745b09a3e503d86e00e5255ff7f715d3d"
                 "1c00"
@@ -72,38 +74,38 @@ namespace
             .value();
 
     static auto const ECRECOVER_VALID_KEY_OUTPUT =
-        evmc::from_hex(std::string_view{"000000000000000000000000a94f5374fce5ed"
-                                        "bc8e2a8697c15331677e6ebf0b"})
+        from_hex(std::string_view{"000000000000000000000000a94f5374fce5ed"
+                                  "bc8e2a8697c15331677e6ebf0b"})
             .value();
 
     // hash of empty string
     static auto const SHA256_NULL_HASH =
-        evmc::from_hex(std::string_view{"e3b0c44298fc1c149afbf4c8996fb92427ae41"
-                                        "e4649b934ca495991b7852b855"})
+        from_hex(std::string_view{"e3b0c44298fc1c149afbf4c8996fb92427ae41"
+                                  "e4649b934ca495991b7852b855"})
             .value();
 
     // hash of the string "lol"
     static auto const SHA256_LOL_HASH =
-        evmc::from_hex(std::string_view{"07123e1f482356c415f684407a3b8723e10b2c"
-                                        "bbc0b8fcd6282c49d37c9c1abc"})
+        from_hex(std::string_view{"07123e1f482356c415f684407a3b8723e10b2c"
+                                  "bbc0b8fcd6282c49d37c9c1abc"})
             .value();
 
     // hash of empty string padded to 32 bytes
     static auto const RIPEMD160_NULL_HASH =
-        evmc::from_hex(std::string_view{"0000000000000000000000009c1185a5c5e9fc"
-                                        "54612808977ee8f548b2258d31"})
+        from_hex(std::string_view{"0000000000000000000000009c1185a5c5e9fc"
+                                  "54612808977ee8f548b2258d31"})
             .value();
 
     // hash of the string "lol" padded to 32 bytes
     static auto const RIPEMD160_LOL_HASH =
-        evmc::from_hex(std::string_view{"00000000000000000000000014d61d472ae2e9"
-                                        "74453fb7a0ef239510f36bee24"})
+        from_hex(std::string_view{"00000000000000000000000014d61d472ae2e9"
+                                  "74453fb7a0ef239510f36bee24"})
             .value();
 
     // the following point evaluation input data was directly copied from
     // https://github.com/ethereum/go-ethereum/tree/master/core/vm/testdata/precompiles
     static auto const POINT_EVALUATION_INPUT =
-        evmc::from_hex(
+        from_hex(
             std::string_view{
                 "014edfed8547661f6cb416eba53061a2f6dce872c0497e6dd485a876fe2567"
                 "f156"
@@ -119,18 +121,21 @@ namespace
 
             .value();
     static auto const POINT_EVALUATION_EXPECTED =
-        evmc::from_hex(std::string_view{"00000000000000000000000000000000000000"
-                                        "0000000000000000000000100073"
-                                        "eda753299d7d483339d80809a1d80553bda402"
-                                        "fffe5bfeffffffff00000001"})
+        from_hex(std::string_view{"00000000000000000000000000000000000000"
+                                  "0000000000000000000000100073"
+                                  "eda753299d7d483339d80809a1d80553bda402"
+                                  "fffe5bfeffffffff00000001"})
             .value();
+
+    struct evmc_some_error
+    {
+    };
 
     struct test_case
     {
         std::string name;
         evmc::bytes input;
-        std::optional<evmc::bytes> expected;
-        std::optional<evmc_status_code> expected_failure;
+        std::variant<evmc::bytes, evmc_some_error, evmc_status_code> expected;
         int64_t gas;
         std::optional<int64_t> gas_offset;
     };
@@ -139,10 +144,14 @@ namespace
     {
         t.name = j.at("Name");
         std::string input = j.at("Input");
-        t.input = evmc::from_hex(std::string_view{input}).value();
+        t.input = from_hex(std::string_view{input}).value();
         if (j.contains("Expected")) {
             std::string expected = j.at("Expected");
-            t.expected = evmc::from_hex(std::string_view{expected}).value();
+            t.expected = from_hex(std::string_view{expected}).value();
+        }
+        else {
+            MONAD_ASSERT(j.contains("ExpectedError"));
+            t.expected = evmc_some_error{};
         }
 
         // Expected-to-fail tests don't have a Gas field, so we assign them the
@@ -185,20 +194,22 @@ namespace
     static test_case const ECRECOVER_TEST_CASES[] = {
         {.name = "ecrecover_unrecoverable_key_enough_gas",
          .input = ECRECOVER_UNRECOVERABLE_KEY_INPUT,
+         .expected = evmc::bytes{},
          .gas = 3'000,
          .gas_offset = 3'000},
         {.name = "ecrecover_unrecoverable_key_insufficient_gas",
          .input = ECRECOVER_UNRECOVERABLE_KEY_INPUT,
-         .expected_failure = evmc_status_code::EVMC_OUT_OF_GAS,
+         .expected = evmc_status_code::EVMC_OUT_OF_GAS,
          .gas = 3'000,
          .gas_offset = -1},
         {.name = "ecrecover_valid_key_enough_gas",
          .input = ECRECOVER_VALID_KEY_INPUT,
+         .expected = ECRECOVER_VALID_KEY_OUTPUT,
          .gas = 3'000,
          .gas_offset = 3'000},
         {.name = "ecrecover_valid_key_insufficient_gas",
          .input = ECRECOVER_VALID_KEY_INPUT,
-         .expected_failure = evmc_status_code::EVMC_OUT_OF_GAS,
+         .expected = evmc_status_code::EVMC_OUT_OF_GAS,
          .gas = 3'000,
          .gas_offset = -1}};
 
@@ -210,7 +221,7 @@ namespace
          .gas_offset = 40},
         {.name = "sha256_empty_insufficient_gas",
          .input = evmc::bytes{},
-         .expected_failure = evmc_status_code::EVMC_OUT_OF_GAS,
+         .expected = evmc_status_code::EVMC_OUT_OF_GAS,
          .gas = 60,
          .gas_offset = -1},
         {.name = "sha256_message_enough_gas",
@@ -220,7 +231,7 @@ namespace
          .gas_offset = 1},
         {.name = "sha256_message_insufficient_gas",
          .input = evmc::bytes{reinterpret_cast<uint8_t const *>("lol"), 3},
-         .expected_failure = evmc_status_code::EVMC_OUT_OF_GAS,
+         .expected = evmc_status_code::EVMC_OUT_OF_GAS,
          .gas = 72,
          .gas_offset = -1}};
 
@@ -232,7 +243,7 @@ namespace
          .gas_offset = 1},
         {.name = "ripemd160_empty_insufficient_gas",
          .input = evmc::bytes{},
-         .expected_failure = evmc_status_code::EVMC_OUT_OF_GAS,
+         .expected = evmc_status_code::EVMC_OUT_OF_GAS,
          .gas = 600,
          .gas_offset = -1},
         {.name = "ripemd160_message_enough_gas",
@@ -242,7 +253,7 @@ namespace
          .gas_offset = 1},
         {.name = "ripemd160_message_insufficient_gas",
          .input = evmc::bytes{reinterpret_cast<uint8_t const *>("lol"), 3},
-         .expected_failure = evmc_status_code::EVMC_OUT_OF_GAS,
+         .expected = evmc_status_code::EVMC_OUT_OF_GAS,
          .gas = 720,
          .gas_offset = -1}};
 
@@ -254,7 +265,7 @@ namespace
          .gas_offset = 1},
         {.name = "identity_empty_insufficient_gas",
          .input = evmc::bytes{},
-         .expected_failure = evmc_status_code::EVMC_OUT_OF_GAS,
+         .expected = evmc_status_code::EVMC_OUT_OF_GAS,
          .gas = 15,
          .gas_offset = -1},
         {.name = "identity_nonempty_enough_gas",
@@ -264,7 +275,7 @@ namespace
          .gas_offset = 1},
         {.name = "identity_nonempty_insufficient_gas",
          .input = evmc::bytes{reinterpret_cast<uint8_t const *>("dead"), 4},
-         .expected_failure = evmc_status_code::EVMC_OUT_OF_GAS,
+         .expected = evmc_status_code::EVMC_OUT_OF_GAS,
          .gas = 18,
          .gas_offset = -1}};
 
@@ -276,7 +287,7 @@ namespace
          .gas_offset = 3'000},
         {.name = "point_evaluation_insufficient_gas",
          .input = POINT_EVALUATION_INPUT,
-         .expected_failure = evmc_status_code::EVMC_OUT_OF_GAS,
+         .expected = evmc_status_code::EVMC_OUT_OF_GAS,
          .gas = 50'000,
          .gas_offset = -1}};
 
@@ -305,41 +316,43 @@ namespace
                     check_call_precompile<traits>(s, call_tracer, input)
                         .value();
 
-                if (test_case.expected) {
+                if (auto const *expected_value =
+                        std::get_if<evmc::bytes>(&test_case.expected)) {
                     EXPECT_EQ(
                         result.status_code, evmc_status_code::EVMC_SUCCESS)
                         << suite_name << " test case " << test_case.name;
-                }
 
-                if (test_case.expected_failure) {
-                    EXPECT_EQ(result.status_code, *test_case.expected_failure)
-                        << suite_name << " test case " << test_case.name;
-                }
-
-                if (result.status_code == evmc_status_code::EVMC_SUCCESS) {
                     EXPECT_EQ(result.gas_left, gas_offset)
                         << suite_name << " test case " << test_case.name
                         << " gas check failed.";
-                }
-                else {
-                    EXPECT_EQ(result.gas_left, 0)
-                        << suite_name << " test case " << test_case.name
-                        << " gas check failed. It should have cleared "
-                           "gas_left.";
-                }
 
-                if (test_case.expected) {
-                    auto &expected = *test_case.expected;
-
-                    ASSERT_EQ(result.output_size, expected.size())
+                    ASSERT_EQ(result.output_size, expected_value->size())
                         << suite_name << " test case " << test_case.name
                         << " output buffer size check failed.";
 
                     for (size_t i = 0; i < result.output_size; i++) {
-                        EXPECT_EQ(expected[i], result.output_data[i])
+                        EXPECT_EQ((*expected_value)[i], result.output_data[i])
                             << suite_name << " test case " << test_case.name
                             << " output buffer equality check failed.";
                     }
+                }
+                else {
+                    EXPECT_NE(
+                        result.status_code, evmc_status_code::EVMC_SUCCESS)
+                        << suite_name << " test case " << test_case.name;
+
+                    // expecting a specific error code
+                    if (auto const *expected_error_code =
+                            std::get_if<evmc_status_code>(
+                                &test_case.expected)) {
+                        EXPECT_EQ(result.status_code, *expected_error_code)
+                            << suite_name << " test case " << test_case.name;
+                    }
+
+                    EXPECT_EQ(result.gas_left, 0)
+                        << suite_name << " test case " << test_case.name
+                        << " gas check failed. It should have cleared "
+                           "gas_left.";
                 }
             };
 
@@ -348,7 +361,12 @@ namespace
             }
             else {
                 test_with_gas_offset(0);
-                test_with_gas_offset(100);
+                // only call for a test_case where gas isn't already set to
+                // int64_t max value to avoid gas overflow
+                if (test_case.gas <=
+                    std::numeric_limits<int64_t>::max() - 100) {
+                    test_with_gas_offset(100);
+                }
             }
         }
     }
@@ -683,7 +701,7 @@ TYPED_TEST(TraitsTest, modexp_truncated_input)
         // modulus size in this example fails to validate.
         static constexpr auto expected_failure =
             TestFixture::Trait::eip_7823_active()
-                ? evmc_status_code::EVMC_FAILURE
+                ? evmc_status_code::EVMC_PRECOMPILE_FAILURE
                 : evmc_status_code::EVMC_OUT_OF_GAS;
 
         static constexpr auto min_gas = [] {
@@ -701,44 +719,43 @@ TYPED_TEST(TraitsTest, modexp_truncated_input)
         auto const test_cases = std::array{
             test_case{
                 .name = "truncated_modulus_len",
-                .input = evmc::from_hex(
-                             "0x00000000000000000000000000000000000000000000000"
+                .input =
+                    from_hex("0x00000000000000000000000000000000000000000000000"
                              "0000000000000000100000000000000000000000000000000"
                              "0000000000000000000000000000000100000000000000000"
                              "000000000000000000000000000000005")
-                             .value(),
-                .expected_failure = expected_failure,
+                        .value(),
+                .expected = expected_failure,
                 .gas = 30'000'000,
             },
             test_case{
                 .name = "truncated_exponent_len",
-                .input =
-                    evmc::from_hex("0x00000000000000000000000000000000000000000"
-                                   "0000000000000000000000100000000000000000000"
-                                   "00000000000000000000000000000005")
-                        .value(),
-                .expected_failure = expected_failure,
+                .input = from_hex("0x00000000000000000000000000000000000000000"
+                                  "0000000000000000000000100000000000000000000"
+                                  "00000000000000000000000000000005")
+                             .value(),
+                .expected = expected_failure,
                 .gas = 30'000'000,
             },
             test_case{
                 .name = "truncated_base_len",
-                .input = evmc::from_hex("0x000000000000000000000000000000000000"
-                                        "00000000000000000500")
+                .input = from_hex("0x000000000000000000000000000000000000"
+                                  "00000000000000000500")
                              .value(),
-                .expected_failure = expected_failure,
+                .expected = expected_failure,
                 .gas = 30'000'000,
             },
             test_case{
                 .name = "truncated_exponent",
-                .input = evmc::from_hex("0x00000000000000000000000000000000000"
-                                        "000000000000000000000"
-                                        "0000000100000000000000000000000000000"
-                                        "000000000000000000000"
-                                        "0000000000000200000000000000000000000"
-                                        "000000000000000000000"
-                                        "000000000000000000050201")
+                .input = from_hex("0x00000000000000000000000000000000000"
+                                  "000000000000000000000"
+                                  "0000000100000000000000000000000000000"
+                                  "000000000000000000000"
+                                  "0000000000000200000000000000000000000"
+                                  "000000000000000000000"
+                                  "000000000000000000050201")
                              .value(),
-                .expected = evmc::from_hex("0x0000000000").value(),
+                .expected = from_hex("0x0000000000").value(),
                 .gas = min_gas,
             },
         };

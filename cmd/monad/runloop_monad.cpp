@@ -21,6 +21,7 @@
 #include <category/core/bytes.hpp>
 #include <category/core/config.hpp>
 #include <category/core/fiber/priority_pool.hpp>
+#include <category/core/hex.hpp>
 #include <category/core/keccak.hpp>
 #include <category/core/procfs/statm.h>
 #include <category/execution/ethereum/block_hash_buffer.hpp>
@@ -187,7 +188,6 @@ Result<BlockExecOutput> propose_block(
 
     // Block input validation
     BOOST_OUTCOME_TRY(static_validate_consensus_header(consensus_header));
-    BOOST_OUTCOME_TRY(chain.static_validate_header(block.header));
     BOOST_OUTCOME_TRY(static_validate_block<traits>(chain, block));
 
     // Sender and EIP-7702 authorities recovery
@@ -387,7 +387,7 @@ std::optional<bytes32_t> handle_header(
     MONAD_ASSERT_PRINTF(
         !header_res.has_error(),
         "Could not rlp decode header: %s",
-        evmc::hex(id).c_str());
+        to_hex(id).c_str());
     auto const &header = header_res.value();
     if (header.seqno > start_exclusive && header.seqno <= end_inclusive) {
         fn(id, header);
@@ -416,7 +416,7 @@ bytes32_t for_each_header(
         MONAD_ASSERT_PRINTF(
             !ts.has_error(),
             "Could not rlp decode timestamp from header: %s",
-            evmc::hex(id).c_str());
+            to_hex(id).c_str());
         auto const rev = chain.get_monad_revision(ts.value());
 
         auto const body = [&]<Traits traits> {
@@ -460,12 +460,12 @@ Result<std::pair<uint64_t, uint64_t>> runloop_monad(
     MonadChain const &chain, std::filesystem::path const &ledger_dir,
     mpt::Db &raw_db, Db &db, vm::VM &vm,
     BlockHashBufferFinalized &block_hash_buffer,
-    fiber::PriorityPool &priority_pool, uint64_t &finalized_block_num,
+    fiber::PriorityPool &priority_pool, uint64_t &block_num,
     uint64_t const end_block_num, sig_atomic_t const volatile &stop,
     bool const enable_tracing)
 {
     constexpr auto SLEEP_TIME = std::chrono::microseconds(100);
-    uint64_t const start_block_num = finalized_block_num;
+    uint64_t const start_block_num = block_num;
     uint256_t const chain_id = chain.get_chain_id();
     BlockHashChain block_hash_chain(block_hash_buffer);
 
@@ -537,6 +537,9 @@ Result<std::pair<uint64_t, uint64_t>> runloop_monad(
 
     std::deque<ToExecute> to_execute;
     std::deque<ToFinalize> to_finalize;
+
+    MONAD_ASSERT(start_block_num > 0);
+    uint64_t finalized_block_num = start_block_num - 1;
 
     while (finalized_block_num < end_block_num && stop == 0) {
         to_finalize.clear();
@@ -719,6 +722,9 @@ Result<std::pair<uint64_t, uint64_t>> runloop_monad(
                 });
         }
     }
+
+    // Increment by one to agree with the other runloops:
+    block_num = finalized_block_num + 1;
 
     return {ntxs, total_gas};
 }

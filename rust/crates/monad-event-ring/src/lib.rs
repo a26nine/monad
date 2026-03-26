@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// #![deny(missing_docs)]
+#![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(rustdoc::private_intra_doc_links)]
 
@@ -84,12 +84,13 @@
 //! ring which iterate independent of each other. In other words, all event readers produce every
 //! event exactly once.
 
-pub use self::{decoder::*, descriptor::*, reader::*, result::*, ring::*};
+pub use self::{decoder::*, descriptor::*, path::*, reader::*, result::*, ring::*};
 
 pub mod ffi;
 
 mod decoder;
 mod descriptor;
+mod path;
 mod reader;
 mod result;
 mod ring;
