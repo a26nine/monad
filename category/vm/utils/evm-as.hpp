@@ -26,83 +26,54 @@
 namespace monad::vm::utils::evm_as
 {
 
-    inline EvmBuilder<EvmTraits<EVMC_LATEST_STABLE_REVISION>> latest()
+    inline EvmBuilder<EvmTraits<MONAD_ETH_LATEST_STABLE_REVISION>> latest()
     {
-        return EvmBuilder<EvmTraits<EVMC_LATEST_STABLE_REVISION>>{};
+        return EvmBuilder<EvmTraits<MONAD_ETH_LATEST_STABLE_REVISION>>{};
     }
 
-    inline EvmBuilder<EvmTraits<EVMC_FRONTIER>> frontier()
+    inline EvmBuilder<EvmTraits<constants::EARLIEST_SUPPORTED_EVM_FORK>>
+    earliest()
     {
-        return EvmBuilder<EvmTraits<EVMC_FRONTIER>>{};
+        return EvmBuilder<EvmTraits<constants::EARLIEST_SUPPORTED_EVM_FORK>>{};
     }
 
-    inline EvmBuilder<EvmTraits<EVMC_HOMESTEAD>> homestead()
+    inline EvmBuilder<EvmTraits<MONAD_ETH_ISTANBUL>> istanbul()
     {
-        return EvmBuilder<EvmTraits<EVMC_HOMESTEAD>>{};
+        return EvmBuilder<EvmTraits<MONAD_ETH_ISTANBUL>>{};
     }
 
-    inline EvmBuilder<EvmTraits<EVMC_TANGERINE_WHISTLE>> tangerine_whistle()
+    inline EvmBuilder<EvmTraits<MONAD_ETH_BERLIN>> berlin()
     {
-        return EvmBuilder<EvmTraits<EVMC_TANGERINE_WHISTLE>>{};
+        return EvmBuilder<EvmTraits<MONAD_ETH_BERLIN>>{};
     }
 
-    inline EvmBuilder<EvmTraits<EVMC_SPURIOUS_DRAGON>> spurious_dragon()
+    inline EvmBuilder<EvmTraits<MONAD_ETH_LONDON>> london()
     {
-        return EvmBuilder<EvmTraits<EVMC_SPURIOUS_DRAGON>>{};
+        return EvmBuilder<EvmTraits<MONAD_ETH_LONDON>>{};
     }
 
-    inline EvmBuilder<EvmTraits<EVMC_BYZANTIUM>> byzantium()
+    inline EvmBuilder<EvmTraits<MONAD_ETH_PARIS>> paris()
     {
-        return EvmBuilder<EvmTraits<EVMC_BYZANTIUM>>{};
+        return EvmBuilder<EvmTraits<MONAD_ETH_PARIS>>{};
     }
 
-    inline EvmBuilder<EvmTraits<EVMC_CONSTANTINOPLE>> constantinople()
+    inline EvmBuilder<EvmTraits<MONAD_ETH_SHANGHAI>> shanghai()
     {
-        return EvmBuilder<EvmTraits<EVMC_CONSTANTINOPLE>>{};
+        return EvmBuilder<EvmTraits<MONAD_ETH_SHANGHAI>>{};
     }
 
-    inline EvmBuilder<EvmTraits<EVMC_PETERSBURG>> petersburg()
+    inline EvmBuilder<EvmTraits<MONAD_ETH_CANCUN>> cancun()
     {
-        return EvmBuilder<EvmTraits<EVMC_PETERSBURG>>{};
+        return EvmBuilder<EvmTraits<MONAD_ETH_CANCUN>>{};
     }
 
-    inline EvmBuilder<EvmTraits<EVMC_ISTANBUL>> istanbul()
+    inline EvmBuilder<EvmTraits<MONAD_ETH_PRAGUE>> prague()
     {
-        return EvmBuilder<EvmTraits<EVMC_ISTANBUL>>{};
+        return EvmBuilder<EvmTraits<MONAD_ETH_PRAGUE>>{};
     }
 
-    inline EvmBuilder<EvmTraits<EVMC_BERLIN>> berlin()
+    inline EvmBuilder<EvmTraits<MONAD_ETH_OSAKA>> osaka()
     {
-        return EvmBuilder<EvmTraits<EVMC_BERLIN>>{};
-    }
-
-    inline EvmBuilder<EvmTraits<EVMC_LONDON>> london()
-    {
-        return EvmBuilder<EvmTraits<EVMC_LONDON>>{};
-    }
-
-    inline EvmBuilder<EvmTraits<EVMC_PARIS>> paris()
-    {
-        return EvmBuilder<EvmTraits<EVMC_PARIS>>{};
-    }
-
-    inline EvmBuilder<EvmTraits<EVMC_SHANGHAI>> shanghai()
-    {
-        return EvmBuilder<EvmTraits<EVMC_SHANGHAI>>{};
-    }
-
-    inline EvmBuilder<EvmTraits<EVMC_CANCUN>> cancun()
-    {
-        return EvmBuilder<EvmTraits<EVMC_CANCUN>>{};
-    }
-
-    inline EvmBuilder<EvmTraits<EVMC_PRAGUE>> prague()
-    {
-        return EvmBuilder<EvmTraits<EVMC_PRAGUE>>{};
-    }
-
-    inline EvmBuilder<EvmTraits<EVMC_OSAKA>> osaka()
-    {
-        return EvmBuilder<EvmTraits<EVMC_OSAKA>>{};
+        return EvmBuilder<EvmTraits<MONAD_ETH_OSAKA>>{};
     }
 }

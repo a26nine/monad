@@ -14,10 +14,13 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include <blockchain_test.hpp>
+#include <category/core/log.hpp>
 #include <event.hpp>
-#include <from_json.hpp>
 #include <revision_map.hpp>
 
+#include <test/utils/from_json.hpp>
+
+#include <category/core/address.hpp>
 #include <category/core/assert.h>
 #include <category/core/byte_string.hpp>
 #include <category/core/bytes.hpp>
@@ -30,8 +33,9 @@
 #include <category/core/keccak.hpp>
 #include <category/core/result.hpp>
 #include <category/execution/ethereum/block_hash_buffer.hpp>
+#include <category/execution/ethereum/chain/chain.hpp>
 #include <category/execution/ethereum/chain/ethereum_mainnet.hpp>
-#include <category/execution/ethereum/core/address.hpp>
+#include <category/execution/ethereum/chain/genesis_state.hpp>
 #include <category/execution/ethereum/core/block.hpp>
 #include <category/execution/ethereum/core/fmt/address_fmt.hpp>
 #include <category/execution/ethereum/core/fmt/bytes_fmt.hpp>
@@ -39,6 +43,8 @@
 #include <category/execution/ethereum/core/rlp/block_rlp.hpp>
 #include <category/execution/ethereum/core/rlp/int_rlp.hpp>
 #include <category/execution/ethereum/core/rlp/transaction_rlp.hpp>
+#include <category/execution/ethereum/core/withdrawal.hpp>
+#include <category/execution/ethereum/db/trie_db.hpp>
 #include <category/execution/ethereum/db/util.hpp>
 #include <category/execution/ethereum/event/exec_event_ctypes.h>
 #include <category/execution/ethereum/event/exec_event_recorder.hpp>
@@ -50,7 +56,9 @@
 #include <category/execution/ethereum/rlp/encode2.hpp>
 #include <category/execution/ethereum/state2/block_state.hpp>
 #include <category/execution/ethereum/state3/state.hpp>
+#include <category/execution/ethereum/trace/call_frame.hpp>
 #include <category/execution/ethereum/trace/call_tracer.hpp>
+#include <category/execution/ethereum/trace/state_tracer.hpp>
 #include <category/execution/ethereum/validate_block.hpp>
 #include <category/execution/ethereum/validate_transaction.hpp>
 #include <category/execution/monad/chain/monad_chain.hpp>
@@ -58,6 +66,8 @@
 #include <category/execution/monad/reserve_balance.hpp>
 #include <category/execution/monad/validate_monad_transaction.hpp>
 #include <category/mpt/nibbles_view.hpp>
+#include <category/vm/evm/monad/revision.h>
+#include <category/vm/evm/revision.h>
 #include <category/vm/evm/switch_traits.hpp>
 #include <category/vm/evm/traits.hpp>
 
@@ -69,10 +79,6 @@
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 
-#include <quill/bundled/fmt/core.h>
-#include <quill/bundled/fmt/format.h>
-#include <quill/detail/LogMacros.h>
-
 #include <boost/outcome/success_failure.hpp>
 #include <boost/outcome/try.hpp>
 
@@ -81,15 +87,18 @@
 #include <memory>
 #include <test_resource_data.h>
 
+#include <ankerl/unordered_dense.h>
+
 #include <algorithm>
-#include <bit>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <optional>
 #include <set>
 #include <span>
 #include <string>
+#include <variant>
 #include <vector>
 
 MONAD_ANONYMOUS_NAMESPACE_BEGIN
@@ -111,7 +120,7 @@ struct TraitsMainnet : MonadChain
         }
     }
 
-    virtual evmc_revision get_revision(
+    virtual monad_eth_revision get_revision(
         uint64_t /* block_number */, uint64_t /* timestamp */) const override
     {
         return traits::evm_rev();
@@ -141,96 +150,6 @@ static fiber::PriorityPool *pool_ = nullptr;
 
 static ankerl::unordered_dense::segmented_set<Address> const
     empty_senders_and_authorities{};
-
-BlockHeader read_genesis_blockheader(nlohmann::json const &genesis_json)
-{
-    BlockHeader block_header{};
-
-    block_header.difficulty = intx::from_string<uint256_t>(
-        genesis_json["difficulty"].get<std::string>());
-
-    auto const extra_data =
-        from_hex(genesis_json["extraData"].get<std::string>());
-    MONAD_ASSERT(extra_data.has_value());
-    block_header.extra_data = extra_data.value();
-
-    block_header.gas_limit =
-        std::stoull(genesis_json["gasLimit"].get<std::string>(), nullptr, 0);
-
-    auto const mix_hash_byte_string =
-        from_hex(genesis_json["mixHash"].get<std::string>());
-    MONAD_ASSERT(mix_hash_byte_string.has_value());
-    std::copy_n(
-        mix_hash_byte_string.value().begin(),
-        mix_hash_byte_string.value().length(),
-        block_header.prev_randao.bytes);
-
-    uint64_t const nonce{
-        std::stoull(genesis_json["nonce"].get<std::string>(), nullptr, 0)};
-    intx::be::unsafe::store<uint64_t>(block_header.nonce.data(), nonce);
-
-    auto const parent_hash_byte_string =
-        from_hex(genesis_json["parentHash"].get<std::string>());
-    MONAD_ASSERT(parent_hash_byte_string.has_value());
-    std::copy_n(
-        parent_hash_byte_string.value().begin(),
-        parent_hash_byte_string.value().length(),
-        block_header.parent_hash.bytes);
-
-    block_header.timestamp =
-        std::stoull(genesis_json["timestamp"].get<std::string>(), nullptr, 0);
-
-    if (genesis_json.contains("coinbase")) {
-        auto const coinbase =
-            from_hex(genesis_json["coinbase"].get<std::string>());
-        MONAD_ASSERT(coinbase.has_value());
-        std::copy_n(
-            coinbase.value().begin(),
-            coinbase.value().length(),
-            block_header.beneficiary.bytes);
-    }
-
-    // London fork
-    if (genesis_json.contains("baseFeePerGas")) {
-        block_header.base_fee_per_gas = intx::from_string<uint256_t>(
-            genesis_json["baseFeePerGas"].get<std::string>());
-    }
-
-    // Shanghai fork
-    if (genesis_json.contains("blobGasUsed")) {
-        block_header.blob_gas_used = std::stoull(
-            genesis_json["blobGasUsed"].get<std::string>(), nullptr, 0);
-    }
-    if (genesis_json.contains("excessBlobGas")) {
-        block_header.excess_blob_gas = std::stoull(
-            genesis_json["excessBlobGas"].get<std::string>(), nullptr, 0);
-    }
-    if (genesis_json.contains("parentBeaconBlockRoot")) {
-        auto const parent_beacon_block_root =
-            from_hex(genesis_json["parentBeaconBlockRoot"].get<std::string>());
-        MONAD_ASSERT(parent_beacon_block_root.has_value());
-        auto &write_to =
-            block_header.parent_beacon_block_root.emplace(bytes32_t{});
-        std::copy_n(
-            parent_beacon_block_root.value().begin(),
-            parent_beacon_block_root.value().length(),
-            write_to.bytes);
-    }
-
-    // Prague fork
-    if (genesis_json.contains("requestsHash")) {
-        auto const requests_hash =
-            from_hex(genesis_json["requestsHash"].get<std::string>());
-        MONAD_ASSERT(requests_hash.has_value());
-        auto &write_to = block_header.requests_hash.emplace(bytes32_t{});
-        std::copy_n(
-            requests_hash.value().begin(),
-            requests_hash.value().length(),
-            write_to.bytes);
-    }
-
-    return block_header;
-}
 
 void validate_post_state(nlohmann::json const &json, nlohmann::json const &db)
 {
@@ -309,6 +228,8 @@ Result<BlockExecOutput> execute(
     bool enable_tracing, std::vector<Receipt> &receipts,
     std::vector<std::vector<CallFrame>> &call_frames)
 {
+    static_assert(traits::evm_rev() >= MONAD_ETH_CONSTANTINOPLE);
+
     using namespace monad::test;
 
     TraitsMainnet<traits> const chain{};
@@ -332,8 +253,9 @@ Result<BlockExecOutput> execute(
     std::vector<std::unique_ptr<CallTracerBase>> call_tracers{
         block.transactions.size()};
     call_frames.resize(block.transactions.size());
-    std::vector<std::unique_ptr<trace::StateTracer>> state_tracers{
-        block.transactions.size()};
+    std::vector<std::unique_ptr<trace::StateTracer>> state_tracers(
+        block.transactions.size());
+    trace::StateTracer system_call_state_tracer{std::monostate{}};
     for (unsigned i = 0; i < block.transactions.size(); ++i) {
         call_tracers[i] =
             enable_tracing
@@ -341,8 +263,8 @@ Result<BlockExecOutput> execute(
                       block.transactions[i], call_frames[i])}
                 : std::unique_ptr<CallTracerBase>{
                       std::make_unique<NoopCallTracer>()};
-        state_tracers[i] = std::unique_ptr<trace::StateTracer>{
-            std::make_unique<trace::StateTracer>(std::monostate{})};
+        state_tracers[i] =
+            std::make_unique<trace::StateTracer>(std::monostate{});
     }
 
     senders_and_authorities_map[block.header.number] =
@@ -381,18 +303,38 @@ Result<BlockExecOutput> execute(
             metrics,
             call_tracers,
             state_tracers,
+            system_call_state_tracer,
             chain_context));
 
     block_state.log_debug();
-    block_state.commit(
+    auto [state, code, _] = std::move(block_state).release();
+
+    CommitBuilder builder(block.header.number);
+    builder.add_state_deltas(*state)
+        .add_code(code)
+        .add_receipts(receipts)
+        .add_transactions(block.transactions, senders)
+        .add_call_frames(
+            std::vector<std::vector<CallFrame>>(block.transactions.size()))
+        .add_ommers(block.ommers);
+    if (block.withdrawals.has_value()) {
+        builder.add_withdrawals(block.withdrawals.value());
+    }
+    db.commit(
         bytes32_t{block.header.number},
+        builder,
         block.header,
-        receipts,
-        std::vector<std::vector<CallFrame>>{block.transactions.size()},
-        senders,
-        block.transactions,
-        block.ommers,
-        block.withdrawals);
+        std::move(state),
+        [&](BlockHeader &h) {
+            h.receipts_root = db.receipts_root();
+            h.state_root = db.state_root();
+            h.withdrawals_root = db.withdrawals_root();
+            h.transactions_root = db.transactions_root();
+            h.gas_used = receipts.empty() ? 0 : receipts.back().gas_used;
+            h.logs_bloom = compute_bloom(receipts);
+            h.ommers_hash = compute_ommers_hash(block.ommers);
+        });
+
     db.finalize(block.header.number, bytes32_t{block.header.number});
 
     BlockExecOutput exec_output;
@@ -421,7 +363,7 @@ Result<std::vector<Receipt>> execute_and_record(
         block.header.parent_hash,
         block.header.number,
         0,
-        block.header.timestamp * 1'000'000'000UL,
+        uint128_t{block.header.timestamp} * uint128_t{1'000'000'000UL},
         size(block.transactions),
         std::nullopt,
         std::nullopt);
@@ -450,65 +392,18 @@ Result<std::vector<Receipt>> execute_and_record(
 template <Traits traits>
 void process_test(
     std::string const &name, nlohmann::json const &j_contents,
-    bool enable_tracing)
+    vm::VM::Mode const vm_mode, bool enable_tracing)
 {
+    static_assert(traits::evm_rev() >= MONAD_ETH_BYZANTIUM);
+
     using namespace test;
-    InMemoryMachine machine;
-    mpt::Db db{machine};
-    monad::TrieDb tdb{db};
-    vm::VM vm;
-    {
-        auto const &genesisJson = j_contents.at("genesisBlockHeader");
-        auto header = read_genesis_blockheader(genesisJson);
-        ASSERT_EQ(
-            NULL_ROOT,
-            from_hex<bytes32_t>(
-                genesisJson.at("transactionsTrie").get<std::string>())
-                .value());
-        ASSERT_EQ(
-            NULL_ROOT,
-            from_hex<bytes32_t>(
-                genesisJson.at("receiptTrie").get<std::string>())
-                .value());
-        ASSERT_EQ(
-            NULL_LIST_HASH,
-            from_hex<bytes32_t>(genesisJson.at("uncleHash").get<std::string>())
-                .value());
-        ASSERT_EQ(
-            bytes32_t{},
-            from_hex<bytes32_t>(genesisJson.at("parentHash").get<std::string>())
-                .value());
 
-        std::optional<std::vector<Withdrawal>> withdrawals;
-        if constexpr (traits::evm_rev() >= EVMC_SHANGHAI) {
-            ASSERT_EQ(
-                NULL_ROOT,
-                from_hex<bytes32_t>(
-                    genesisJson.at("withdrawalsRoot").get<std::string>())
-                    .value());
-            withdrawals.emplace(std::vector<Withdrawal>{});
-        }
+    auto const json_state = load_blockchain_json_state<traits>(j_contents);
+    auto const test_state = json_state.make_test_state();
+    vm::VM vm{vm_mode};
+    mpt::Db &db = test_state->db;
+    monad::TrieDb &tdb = test_state->trie_db;
 
-        BlockState bs{tdb, vm};
-        State state{bs, Incarnation{0, 0}};
-        j_contents.at("pre").get_to(state);
-        bs.merge(state);
-        bs.commit(
-            NULL_HASH_BLAKE3,
-            header,
-            {} /* receipts */,
-            {} /* call frames */,
-            {} /* senders */,
-            {} /* transactions */,
-            {} /* ommers */,
-            withdrawals);
-        tdb.finalize(0, NULL_HASH_BLAKE3);
-        ASSERT_EQ(
-            to_bytes(
-                keccak256(rlp::encode_block_header(tdb.read_eth_header()))),
-            from_hex<bytes32_t>(genesisJson.at("hash").get<std::string>())
-                .value());
-    }
     auto db_post_state = tdb.to_json();
 
     BlockHashBufferFinalized block_hash_buffer;
@@ -595,48 +490,45 @@ void process_test(
             auto const tdb_ommers_hash = to_bytes(keccak256(encoded_ommers));
             EXPECT_EQ(tdb_ommers_hash, block.value().header.ommers_hash)
                 << name;
-            if constexpr (traits::evm_rev() >= EVMC_BYZANTIUM) {
-                EXPECT_EQ(
-                    tdb.receipts_root(), block.value().header.receipts_root)
-                    << name;
-            }
+            EXPECT_EQ(tdb.receipts_root(), block.value().header.receipts_root)
+                << name;
             EXPECT_EQ(result.value().size(), block.value().transactions.size())
                 << name;
 
             if (check_exec_events) {
                 EXPECT_FALSE(exec_events.block_reject_code) << name;
                 EXPECT_EQ(
-                    exec_events.block_end->exec_output.state_root,
+                    bytes32_t(exec_events.block_end->exec_output.state_root),
                     tdb.state_root())
                     << name;
                 EXPECT_EQ(
-                    exec_events.block_start->eth_block_input.transactions_root,
+                    bytes32_t(exec_events.block_start->eth_block_input
+                                  .transactions_root),
                     tdb.transactions_root())
                     << name;
                 if (tdb.withdrawals_root()) {
                     EXPECT_EQ(
-                        exec_events.block_start->eth_block_input
-                            .withdrawals_root,
+                        bytes32_t(exec_events.block_start->eth_block_input
+                                      .withdrawals_root),
                         *tdb.withdrawals_root())
                         << name;
                 }
                 else {
                     EXPECT_EQ(
-                        exec_events.block_start->eth_block_input
-                            .withdrawals_root,
+                        bytes32_t(exec_events.block_start->eth_block_input
+                                      .withdrawals_root),
                         bytes32_t{})
                         << name;
                 }
                 EXPECT_EQ(
-                    exec_events.block_start->eth_block_input.ommers_hash,
+                    bytes32_t(
+                        exec_events.block_start->eth_block_input.ommers_hash),
                     tdb_ommers_hash)
                     << name;
-                if constexpr (traits::evm_rev() >= EVMC_BYZANTIUM) {
-                    EXPECT_EQ(
-                        exec_events.block_end->exec_output.receipts_root,
-                        tdb.receipts_root())
-                        << name;
-                }
+                EXPECT_EQ(
+                    bytes32_t(exec_events.block_end->exec_output.receipts_root),
+                    tdb.receipts_root())
+                    << name;
                 EXPECT_EQ(
                     exec_events.block_start->eth_block_input.txn_count,
                     result.value().size())
@@ -687,7 +579,8 @@ void process_test(
                 if (check_exec_events) {
                     ASSERT_LT(i, size(exec_events.txn_inputs));
                     EXPECT_EQ(
-                        exec_events.txn_inputs[i]->txn_hash, to_bytes(hash))
+                        bytes32_t(exec_events.txn_inputs[i]->txn_hash),
+                        to_bytes(hash))
                         << name;
                 }
             }
@@ -728,18 +621,21 @@ void process_test(
 }
 
 void process_test(
-    std::variant<evmc_revision, monad_revision> const &revision,
+    std::variant<monad_eth_revision, monad_revision> const &revision,
     std::string const &name, nlohmann::json const &j_contents,
-    bool enable_tracing)
+    vm::VM::Mode const vm_mode, bool const enable_tracing)
 {
-    if (std::holds_alternative<evmc_revision>(revision)) {
-        auto const rev = std::get<evmc_revision>(revision);
-        MONAD_ASSERT(rev != EVMC_CONSTANTINOPLE);
-        SWITCH_EVM_TRAITS(process_test, name, j_contents, enable_tracing);
+    if (std::holds_alternative<monad_eth_revision>(revision)) {
+        auto const rev = std::get<monad_eth_revision>(revision);
+        SWITCH_EVM_TRAITS(
+            process_test, name, j_contents, vm_mode, enable_tracing);
+        MONAD_ASSERT(false);
     }
     else {
         auto const rev = std::get<monad_revision>(revision);
-        SWITCH_MONAD_TRAITS(process_test, name, j_contents, enable_tracing);
+        SWITCH_MONAD_TRAITS(
+            process_test, name, j_contents, vm_mode, enable_tracing);
+        MONAD_ASSERT(false);
     }
 }
 
@@ -782,7 +678,15 @@ void BlockchainTest::TestBody()
 
         executed = true;
 
-        process_test(rev, name, j_contents, enable_tracing_);
+        for (auto const vm_mode : vm::VM::all_modes) {
+            if (fixed_vm_mode_.has_value() &&
+                fixed_vm_mode_.value() != vm_mode) {
+                continue;
+            }
+            auto const enum_name = vm::VM::mode_to_string(vm_mode);
+            auto const full_name = name + "(" + enum_name + " VM mode)";
+            process_test(rev, full_name, j_contents, vm_mode, enable_tracing_);
+        }
     }
 
     if (!executed && revision_.has_value()) {
@@ -796,13 +700,14 @@ void BlockchainTest::TestBody()
 
 void register_blockchain_tests_path(
     std::filesystem::path const &root,
-    std::optional<std::variant<evmc_revision, monad_revision>> const &revision,
-    bool enable_tracing)
+    std::optional<std::variant<monad_eth_revision, monad_revision>> const
+        &revision,
+    std::optional<vm::VM::Mode> const vm_mode, bool const enable_tracing)
 {
     namespace fs = std::filesystem;
     MONAD_ASSERT(fs::exists(root));
 
-    auto register_test = [&root, &revision, enable_tracing](
+    auto register_test = [&root, &revision, vm_mode, enable_tracing](
                              fs::path const &path) {
         if (path.extension() == ".json") {
             MONAD_ASSERT(fs::is_regular_file(path));
@@ -822,7 +727,7 @@ void register_blockchain_tests_path(
                 0,
                 [=] {
                     return new test::BlockchainTest(
-                        path, revision, enable_tracing);
+                        path, revision, vm_mode, enable_tracing);
                 });
         }
     };
@@ -839,8 +744,9 @@ void register_blockchain_tests_path(
 }
 
 void register_blockchain_tests(
-    std::optional<std::variant<evmc_revision, monad_revision>> const &revision,
-    bool enable_tracing)
+    std::optional<std::variant<monad_eth_revision, monad_revision>> const
+        &revision,
+    std::optional<vm::VM::Mode> const vm_mode, bool const enable_tracing)
 {
     // skip slow tests
     testing::FLAGS_gtest_filter +=
@@ -853,13 +759,18 @@ void register_blockchain_tests(
     register_blockchain_tests_path(
         test_resource::ethereum_tests_dir / "BlockchainTests",
         revision,
+        vm_mode,
         enable_tracing);
     register_blockchain_tests_path(
-        test_resource::internal_blockchain_tests_dir, revision, enable_tracing);
+        test_resource::internal_blockchain_tests_dir,
+        revision,
+        vm_mode,
+        enable_tracing);
     register_blockchain_tests_path(
         test_resource::build_dir /
             "src/ExecutionSpecTestFixtures/blockchain_tests",
         revision,
+        vm_mode,
         enable_tracing);
 }
 

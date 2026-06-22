@@ -20,8 +20,10 @@
 #include <category/core/lru/static_lru_cache.hpp>
 #include <category/mpt/compute.hpp>
 #include <category/mpt/config.hpp>
+#include <category/mpt/db_metadata_context.hpp>
 #include <category/mpt/detail/collected_stats.hpp>
 #include <category/mpt/detail/db_metadata.hpp>
+#include <category/mpt/detail/timeline.hpp>
 #include <category/mpt/node.hpp>
 #include <category/mpt/node_cursor.hpp>
 #include <category/mpt/state_machine.hpp>
@@ -49,11 +51,9 @@
 #include <bit>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <vector>
-
-// temporary
-#include "detail/boost_fiber_workarounds.hpp"
 
 MONAD_MPT_NAMESPACE_BEGIN
 
@@ -73,7 +73,8 @@ struct write_operation_io_receiver
 
     void set_value(
         MONAD_ASYNC_NAMESPACE::erased_connected_operation *,
-        MONAD_ASYNC_NAMESPACE::write_single_buffer_sender::result_type res)
+        MONAD_ASYNC_NAMESPACE::write_single_buffer_sender::result_type const
+            res)
     {
         MONAD_ASSERT(res);
         MONAD_ASSERT(res.assume_value().get().size() == should_be_written);
@@ -164,36 +165,26 @@ public:
     }
 };
 
-chunk_offset_t
-async_write_node_set_spare(UpdateAuxImpl &, Node &, bool is_fast);
+chunk_offset_t async_write_node_set_spare(UpdateAux &, Node &, bool is_fast);
 
 chunk_offset_t
-write_new_root_node(UpdateAuxImpl &, Node &root, uint64_t version);
+write_new_root_node(UpdateAux &, Node &root, uint64_t version, timeline_id tid);
 
 node_writer_unique_ptr_type
-replace_node_writer(UpdateAuxImpl &, node_writer_unique_ptr_type const &);
+replace_node_writer(UpdateAux &, node_writer_unique_ptr_type const &);
 
 // \class Auxiliaries for triedb update
-class UpdateAuxImpl
+class UpdateAux
 {
-    uint32_t initial_insertion_count_on_pool_creation_{0};
-    bool enable_dynamic_history_length_{true};
-
-    struct db_metadata_
-    {
-        detail::db_metadata *main{nullptr};
-        std::span<chunk_offset_t> root_offsets;
-    } db_metadata_[2]; // two copies, to prevent sudden process
-                       // exits making the DB irretrievable
-
     void reset_node_writers();
 
-    void advance_compact_offsets();
+    void advance_compact_offsets(Node::SharedPtr prev_root, timeline_id tid);
 
     void free_compacted_chunks();
 
-    // clear root offsets of versions <= version
-    void clear_root_offsets_up_to_and_including(uint64_t version);
+    // clear a timeline's root offsets of versions <= version
+    void
+    clear_root_offsets_up_to_and_including(uint64_t version, timeline_id tid);
     void release_unreferenced_chunks();
 
     double
@@ -209,11 +200,17 @@ class UpdateAuxImpl
     TODO: Develop a more efficient and scalable mechanism for auto-expiration
     throttling. The goal is to ensure stable database commit times despite
     varying block loads. */
-    int64_t calc_auto_expire_version(uint64_t upsert_version) noexcept;
-
-    void set_auto_expire_version_metadata(int64_t) noexcept;
+    int64_t
+    calc_auto_expire_version(uint64_t upsert_version, timeline_id tid) noexcept;
 
     void update_disk_growth_data();
+
+    uint32_t initial_insertion_count_on_pool_creation_{0};
+    bool enable_dynamic_history_length_{true};
+
+    // Owns the mmap lifecycle for db_metadata. Contains the two copies of
+    // mmap'd db_metadata pointers and root_offsets spans.
+    std::unique_ptr<DbMetadataContext> metadata_ctx_;
 
     /******** Compaction ********/
     uint32_t chunks_to_remove_before_count_fast_{0};
@@ -227,24 +224,24 @@ class UpdateAuxImpl
         MIN_COMPACT_VIRTUAL_OFFSET};
     compact_virtual_chunk_offset_t last_block_disk_growth_slow_{
         MIN_COMPACT_VIRTUAL_OFFSET};
-    // compaction range
-    compact_virtual_chunk_offset_t compact_offset_range_fast_{
-        MIN_COMPACT_VIRTUAL_OFFSET};
-    compact_virtual_chunk_offset_t compact_offset_range_slow_{
-        MIN_COMPACT_VIRTUAL_OFFSET};
-
     bool alternate_slow_fast_writer_{false};
     bool can_write_to_fast_{true};
-
-    virtual void on_read_only_init_with_dirty_bit() noexcept {};
 
 public:
     // Allocate the first cnv chunk for db metadata copies
     static constexpr unsigned cnv_chunks_for_db_metadata = 1;
 
-    int64_t curr_upsert_auto_expire_version{0};
-    compact_offset_pair compact_offsets{
-        MIN_COMPACT_VIRTUAL_OFFSET, MIN_COMPACT_VIRTUAL_OFFSET};
+    timeline_compaction_state timeline_[NUM_TIMELINES];
+
+    timeline_compaction_state &tl(timeline_id id) noexcept
+    {
+        return timeline_[static_cast<unsigned>(id)];
+    }
+
+    timeline_compaction_state const &tl(timeline_id id) const noexcept
+    {
+        return timeline_[static_cast<unsigned>(id)];
+    }
 
     // On disk stuff
     MONAD_ASYNC_NAMESPACE::AsyncIO *io{nullptr};
@@ -254,181 +251,60 @@ public:
     detail::TrieUpdateCollectedStats stats;
 
     // in-memory
-    UpdateAuxImpl() = default;
+    UpdateAux() = default;
 
     // on-disk
-    explicit UpdateAuxImpl(
+    explicit UpdateAux(
         MONAD_ASYNC_NAMESPACE::AsyncIO &io_,
         std::optional<uint64_t> const history_len = {})
     {
-        set_io(io_, history_len);
+        init(io_, history_len);
     }
 
-    virtual ~UpdateAuxImpl();
+    ~UpdateAux();
 
-    void set_io(
-        MONAD_ASYNC_NAMESPACE::AsyncIO &,
+    void init(
+        MONAD_ASYNC_NAMESPACE::AsyncIO &io_,
         std::optional<uint64_t> history_length = {});
-
-    void unset_io();
 
     Node::SharedPtr do_update(
         Node::SharedPtr prev_root, StateMachine &, UpdateList &&,
-        uint64_t version, bool compaction = false,
-        bool can_write_to_fast = true, bool write_root = true);
+        uint64_t version, bool compaction, bool can_write_to_fast,
+        bool write_root, timeline_id tid);
 
     void adjust_history_length_based_on_disk_usage();
-    void move_trie_version_forward(uint64_t src, uint64_t dest);
+    void move_trie_version_forward(
+        uint64_t src, uint64_t dest, timeline_id tid = timeline_id::primary);
 
     // collect and print trie update stats
     void reset_stats();
     void collect_expire_stats(bool is_read);
     void collect_number_nodes_created_stats();
     void collect_compaction_read_stats(
-        chunk_offset_t node_offset, unsigned bytes_to_read);
+        chunk_offset_t node_offset, unsigned bytes_to_read, timeline_id tid);
     void collect_compacted_nodes_stats(
-        bool const copy_node_for_fast, bool const rewrite_to_fast,
-        virtual_chunk_offset_t node_offset, uint32_t node_disk_size);
+        bool copy_node_for_fast, bool rewrite_to_fast,
+        virtual_chunk_offset_t node_offset, uint32_t node_disk_size,
+        timeline_id tid);
 
-    void print_update_stats(uint64_t version);
+    void print_update_stats(uint64_t version, timeline_id tid);
 
-    enum class chunk_list : uint8_t
+    using chunk_list = DbMetadataContext::chunk_list;
+
+    DbMetadataContext &metadata_ctx() noexcept
     {
-        free = 0,
-        fast = 1,
-        slow = 2
-    };
-
-    detail::db_metadata const *db_metadata() const noexcept
-    {
-        return db_metadata_[0].main;
+        MONAD_ASSERT(metadata_ctx_ != nullptr);
+        return *metadata_ctx_;
     }
 
-    auto root_offsets(unsigned which = 0) const
+    DbMetadataContext const &metadata_ctx() const noexcept
     {
-        class root_offsets_delegator
-        {
-            std::atomic_ref<uint64_t> version_lower_bound_;
-            std::atomic_ref<uint64_t> next_version_;
-            std::span<chunk_offset_t> root_offsets_chunks_;
-
-            void
-            update_version_lower_bound_(uint64_t lower_bound = uint64_t(-1))
-            {
-                auto const version_lower_bound =
-                    version_lower_bound_.load(std::memory_order_acquire);
-                auto idx = (lower_bound < version_lower_bound)
-                               ? lower_bound
-                               : version_lower_bound;
-                auto const max_version =
-                    next_version_.load(std::memory_order_acquire) - 1;
-                if (max_version == INVALID_BLOCK_NUM) {
-                    return;
-                }
-                while (idx < max_version && (*this)[idx] == INVALID_OFFSET) {
-                    idx++;
-                }
-                if (idx != version_lower_bound) {
-                    version_lower_bound_.store(idx, std::memory_order_release);
-                }
-            }
-
-        public:
-            explicit root_offsets_delegator(const struct db_metadata_ *m)
-                : version_lower_bound_(
-                      m->main->root_offsets.version_lower_bound_)
-                , next_version_(m->main->root_offsets.next_version_)
-                , root_offsets_chunks_(
-                      std::span<chunk_offset_t>(m->root_offsets))
-            {
-                MONAD_ASSERT_PRINTF(
-                    root_offsets_chunks_.size() ==
-                        1ULL
-                            << (63 -
-                                std::countl_zero(root_offsets_chunks_.size())),
-                    "root offsets chunks size is %lu, not a power of 2",
-                    root_offsets_chunks_.size());
-            }
-
-            size_t capacity() const noexcept
-            {
-                return root_offsets_chunks_.size();
-            }
-
-            void push(chunk_offset_t const o) noexcept
-            {
-                auto const wp = next_version_.load(std::memory_order_relaxed);
-                auto const next_wp = wp + 1;
-                MONAD_ASSERT(next_wp != 0);
-                auto *p = start_lifetime_as<std::atomic<chunk_offset_t>>(
-                    &root_offsets_chunks_
-                        [wp & (root_offsets_chunks_.size() - 1)]);
-                p->store(o, std::memory_order_release);
-                next_version_.store(next_wp, std::memory_order_release);
-                if (o != INVALID_OFFSET) {
-                    update_version_lower_bound_();
-                }
-            }
-
-            void assign(size_t const i, chunk_offset_t const o) noexcept
-            {
-                auto *p = start_lifetime_as<std::atomic<chunk_offset_t>>(
-                    &root_offsets_chunks_
-                        [i & (root_offsets_chunks_.size() - 1)]);
-                p->store(o, std::memory_order_release);
-                update_version_lower_bound_(
-                    (o != INVALID_OFFSET) ? i : uint64_t(-1));
-            }
-
-            chunk_offset_t operator[](size_t const i) const noexcept
-            {
-                return start_lifetime_as<std::atomic<chunk_offset_t> const>(
-                           &root_offsets_chunks_
-                               [i & (root_offsets_chunks_.size() - 1)])
-                    ->load(std::memory_order_acquire);
-            }
-
-            // return INVALID_BLOCK_NUM indicates that db is empty
-            uint64_t max_version() const noexcept
-            {
-                auto const wp = next_version_.load(std::memory_order_acquire);
-                return wp - 1;
-            }
-
-            void reset_all(uint64_t const version)
-            {
-                version_lower_bound_.store(0, std::memory_order_release);
-                next_version_.store(0, std::memory_order_release);
-                memset(
-                    (void *)root_offsets_chunks_.data(),
-                    0xff,
-                    root_offsets_chunks_.size() * sizeof(chunk_offset_t));
-                version_lower_bound_.store(version, std::memory_order_release);
-                next_version_.store(version, std::memory_order_release);
-            }
-
-            void rewind_to_version(uint64_t const version)
-            {
-                MONAD_ASSERT(version < max_version());
-                MONAD_ASSERT(max_version() - version <= capacity());
-                for (uint64_t i = version + 1; i <= max_version(); i++) {
-                    assign(i, async::INVALID_OFFSET);
-                }
-                if (version <
-                    version_lower_bound_.load(std::memory_order_acquire)) {
-                    version_lower_bound_.store(
-                        version, std::memory_order_release);
-                }
-                next_version_.store(version + 1, std::memory_order_release);
-                update_version_lower_bound_();
-            }
-        };
-
-        return root_offsets_delegator{&db_metadata_[which]};
+        MONAD_ASSERT(metadata_ctx_ != nullptr);
+        return *metadata_ctx_;
     }
 
     // clear all versions <= version, release unused disk space
-    void erase_versions_up_to_and_including(uint64_t version);
+    void erase_versions_up_to_and_including(uint64_t version, timeline_id tid);
 
     // translate between virtual and physical addresses chunk_offset_t
     virtual_chunk_offset_t physical_to_virtual(chunk_offset_t) const noexcept;
@@ -437,56 +313,20 @@ public:
     std::pair<chunk_list, detail::unsigned_20>
     chunk_list_and_age(uint32_t idx) const noexcept;
 
-    void append(chunk_list list, uint32_t idx) noexcept;
-    void remove(uint32_t idx) noexcept;
-
-    template <typename Func, typename... Args>
-        requires std::invocable<
-            std::function<void(detail::db_metadata *, Args...)>,
-            detail::db_metadata *, Args...>
-    void modify_metadata(Func func, Args &&...args) noexcept
-    {
-        func(db_metadata_[0].main, std::forward<Args>(args)...);
-        func(db_metadata_[1].main, std::forward<Args>(args)...);
-    }
-
-    // This function should only be invoked after completing a upsert
-    void advance_db_offsets_to(
-        chunk_offset_t fast_offset, chunk_offset_t slow_offset) noexcept;
-
-    void append_root_offset(chunk_offset_t root_offset) noexcept;
-    void update_root_offset(size_t i, chunk_offset_t root_offset) noexcept;
-    void fast_forward_next_version(uint64_t version) noexcept;
-
-    void update_history_length_metadata(uint64_t history_len) noexcept;
-    void set_latest_finalized_version(uint64_t version) noexcept;
-    void set_latest_verified_version(uint64_t version) noexcept;
-    void set_latest_voted(uint64_t version, bytes32_t const &block_id) noexcept;
-    void
-    set_latest_proposed(uint64_t version, bytes32_t const &block_id) noexcept;
-    uint64_t get_latest_finalized_version() const noexcept;
-    uint64_t get_latest_verified_version() const noexcept;
-    bytes32_t get_latest_voted_block_id() const noexcept;
-    uint64_t get_latest_voted_version() const noexcept;
-    bytes32_t get_latest_proposed_block_id() const noexcept;
-    uint64_t get_latest_proposed_version() const noexcept;
-
-    int64_t get_auto_expire_version_metadata() const noexcept;
-
     // WARNING: These are destructive, they discard immediately any extraneous
     // data.
     void rewind_to_match_offsets();
     void rewind_to_version(uint64_t version);
     void clear_ondisk_db();
 
-    void set_initial_insertion_count_unit_testing_only(uint32_t count)
+    void set_initial_insertion_count_unit_testing_only(uint32_t const count)
     {
         initial_insertion_count_on_pool_creation_ = count;
     }
 
     // WARNING: for unit testing only
     // DO NOT invoke it outside of unit test
-    void alternate_slow_fast_node_writer_unit_testing_only(bool alternate)
+    void alternate_slow_fast_node_writer_unit_testing_only(bool const alternate)
     {
         alternate_slow_fast_writer_ = alternate;
     }
@@ -501,7 +341,7 @@ public:
         return can_write_to_fast_;
     }
 
-    void set_can_write_to_fast(bool v) noexcept
+    void set_can_write_to_fast(bool const v) noexcept
     {
         can_write_to_fast_ = v;
     }
@@ -522,89 +362,19 @@ public:
                (double)num_chunks(chunk_list::free) / (double)io->chunk_count();
     }
 
-    chunk_offset_t get_latest_root_offset() const noexcept
-    {
-        MONAD_ASSERT(this->is_on_disk());
-        auto const ro = root_offsets();
-        return ro[ro.max_version()];
-    }
-
-    chunk_offset_t
-    get_root_offset_at_version(uint64_t const version) const noexcept
-    {
-        MONAD_ASSERT(this->is_on_disk());
-        if (version <= db_history_max_version()) {
-            auto const offset = root_offsets()[version];
-            if (version >= db_history_range_lower_bound()) {
-                return offset;
-            }
-        }
-        return INVALID_OFFSET;
-    }
-
-    bool version_is_valid_ondisk(uint64_t const version) const noexcept
-    {
-        MONAD_ASSERT(is_on_disk());
-        return get_root_offset_at_version(version) != INVALID_OFFSET;
-    }
-
-    chunk_offset_t get_start_of_wip_fast_offset() const noexcept
-    {
-        MONAD_ASSERT(this->is_on_disk());
-        return db_metadata()->db_offsets.start_of_wip_offset_fast;
-    }
-
-    chunk_offset_t get_start_of_wip_slow_offset() const noexcept
-    {
-        MONAD_ASSERT(this->is_on_disk());
-        return db_metadata()->db_offsets.start_of_wip_offset_slow;
-    }
-
-    file_offset_t get_lower_bound_free_space() const noexcept
-    {
-        MONAD_ASSERT(this->is_on_disk());
-        return db_metadata()->capacity_in_free_list;
-    }
-
     uint32_t num_chunks(chunk_list const list) const noexcept;
 
-    uint64_t version_history_max_possible() const noexcept;
-    uint64_t version_history_length() const noexcept;
-
-    // Following funcs on db history are for on disk db only. In
-    // memory db does not have any version history.
-    // Db history range, returned version NOT always valid
-    uint64_t db_history_range_lower_bound() const noexcept;
-    uint64_t db_history_max_version() const noexcept;
-    // Returns the first min version with a root offset. On disk db returns
-    // invalid if it contains empty version
-    uint64_t db_history_min_valid_version() const noexcept;
+    // Timeline lifecycle. The metadata-header portion of each operation lives
+    // on DbMetadataContext; these methods keep the per-timeline compaction
+    // state (tl()) in sync with the header.
+    void activate_secondary_timeline();
+    void deactivate_secondary_timeline();
+    void promote_secondary_to_primary();
 };
 
 static_assert(
-    sizeof(UpdateAuxImpl) == 144 + sizeof(detail::TrieUpdateCollectedStats));
-static_assert(alignof(UpdateAuxImpl) == 8);
-
-class UpdateAux final : public UpdateAuxImpl
-{
-public:
-    // in-memory
-    UpdateAux() = default;
-
-    // on-disk
-    explicit UpdateAux(
-        MONAD_ASYNC_NAMESPACE::AsyncIO &io_,
-        std::optional<uint64_t> const history_len = {})
-        : UpdateAuxImpl(io_, history_len)
-    {
-    }
-
-    ~UpdateAux()
-    {
-        // Prevent race on vptr
-        std::atomic_thread_fence(std::memory_order_acq_rel);
-    }
-};
+    sizeof(UpdateAux) == 120 + sizeof(detail::TrieUpdateCollectedStats));
+static_assert(alignof(UpdateAux) == 8);
 
 template <receiver Receiver>
     requires(
@@ -613,7 +383,7 @@ template <receiver Receiver>
         MONAD_ASYNC_NAMESPACE::compatible_sender_receiver<
             read_long_update_sender, Receiver> &&
         Receiver::lifetime_managed_internally)
-void async_read(UpdateAuxImpl &aux, Receiver &&receiver)
+void async_read(UpdateAux &aux, Receiver &&receiver)
 {
     [[likely]] if (
         receiver.bytes_to_read <=
@@ -639,21 +409,23 @@ void async_read(UpdateAuxImpl &aux, Receiver &&receiver)
 
 // batch upsert, updates can be nested
 Node::SharedPtr upsert(
-    UpdateAuxImpl &, uint64_t version, StateMachine &, Node::SharedPtr old,
-    UpdateList &&, bool write_root = true);
+    UpdateAux &, uint64_t version, StateMachine &, Node::SharedPtr old,
+    UpdateList &&, bool write_root, timeline_id tid);
 
 // Performs a deep copy of a subtrie from `src_root` trie at
 // `src_prefix` to the `dest_root` trie at `dest_prefix`.
 // Note that `src_root` may be of a different version than `dest_root`.
 // Any pre-existing trie at `dest_prefix` will be overwritten.
 // The in-memory effect is similar to a move operation.
+// `tid` selects which timeline reads the source nodes (and which
+// timeline's root-offset metadata is updated when `write_root` is true).
 Node::SharedPtr copy_trie_to_dest(
-    UpdateAuxImpl &, Node::SharedPtr src_root, NibblesView src_prefix,
+    UpdateAux &, Node::SharedPtr src_root, NibblesView src_prefix,
     Node::SharedPtr dest_root, NibblesView dest_prefix, uint64_t dest_version,
-    bool write_root = true);
+    timeline_id tid, bool write_root = true);
 
 // load all nodes as far as caching policy would allow
-size_t load_all(UpdateAuxImpl &, StateMachine &, NodeCursor const &);
+size_t load_all(UpdateAux &, StateMachine &, NodeCursor const &);
 
 //////////////////////////////////////////////////////////////////////////////
 // find
@@ -675,50 +447,70 @@ using find_result_type = std::pair<T, find_result>;
 using find_cursor_result_type = find_result_type<NodeCursor>;
 using find_owning_cursor_result_type = find_result_type<NodeCursor>;
 
-using inflight_map_t = ankerl::unordered_dense::segmented_map<
-    chunk_offset_t,
-    std::vector<
-        std::function<MONAD_ASYNC_NAMESPACE::result<void>(NodeCursor const &)>>,
-    chunk_offset_t_hasher>;
-
 using inflight_map_owning_t = ankerl::unordered_dense::segmented_map<
     virtual_chunk_offset_t,
-    std::vector<
-        std::function<MONAD_ASYNC_NAMESPACE::result<void>(NodeCursor const &)>>,
+    std::vector<std::move_only_function<MONAD_ASYNC_NAMESPACE::result<void>(
+        NodeCursor const &)>>,
     virtual_chunk_offset_t_hasher>;
 
-// The request type to put to the fiber buffered channel for triedb thread
-// to work on
+// The request type queued to the triedb worker thread. Promise is held by
+// value (move-only); the submitting fiber moves it in and keeps the future.
+//
+// boost::fibers::shared_state uses std::aligned_storage internally, which is
+// deprecated in C++23 (-Wdeprecated-declarations); the template instantiation
+// triggered by this by-value member surfaces the diagnostic in every TU that
+// parses this header, so the suppression must wrap the struct definition
+// itself, not just the boost include.
+#ifdef __clang__
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+#ifdef __GNUC__
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
 struct fiber_find_request_t
 {
-    threadsafe_boost_fibers_promise<find_cursor_result_type> *promise;
+    ::boost::fibers::promise<find_cursor_result_type> promise{};
     NodeCursor start{};
     NibblesView key{};
 };
-
-static_assert(sizeof(fiber_find_request_t) == 48);
-static_assert(alignof(fiber_find_request_t) == 8);
+#ifdef __GNUC__
+    #pragma GCC diagnostic pop
+#endif
+#ifdef __clang__
+    #pragma clang diagnostic pop
+#endif
 
 class NodeCache;
 
-//! \warning this is not threadsafe, should only be called from triedb thread
-// during execution, DO NOT invoke it directly from a transaction fiber, as is
-// not race free.
+/*! \brief Walk the trie and resolve `key` into the promise.
+
+The promise is taken by value: ownership flows through the recursion. Sync
+exit paths consume the promise via `set_value` and return; async paths move
+the promise into the I/O receiver's continuation, which carries it forward
+to the next recursive invocation when the read completes. The receiver's
+destruction is the natural lifetime fence, so no external tracker is
+needed.
+
+\warning this is not threadsafe, should only be called from triedb thread
+during execution, DO NOT invoke it directly from a transaction fiber, as it
+is not race-free.
+*/
 void find_notify_fiber_future(
-    UpdateAuxImpl &, inflight_map_t &,
-    threadsafe_boost_fibers_promise<find_cursor_result_type> &,
+    UpdateAux &, ::boost::fibers::promise<find_cursor_result_type>,
     NodeCursor const &start, NibblesView key);
 
 // rodb
 void find_owning_notify_fiber_future(
-    UpdateAuxImpl &, NodeCache &, inflight_map_owning_t &,
-    threadsafe_boost_fibers_promise<find_owning_cursor_result_type> &promise,
+    UpdateAux &, NodeCache &, inflight_map_owning_t &,
+    ::boost::fibers::promise<find_owning_cursor_result_type> promise,
     NodeCursor const &start, NibblesView, uint64_t version);
 
 // rodb load root
 void load_root_notify_fiber_future(
-    UpdateAuxImpl &, NodeCache &, inflight_map_owning_t &,
-    threadsafe_boost_fibers_promise<find_owning_cursor_result_type> &promise,
+    UpdateAux &, NodeCache &, inflight_map_owning_t &,
+    ::boost::fibers::promise<find_owning_cursor_result_type> promise,
     uint64_t version);
 
 /*! \brief blocking find node indexed by key from root, It works for both
@@ -730,7 +522,8 @@ synchronization is provided, and user code should make sure no other place is
 modifying trie.
 */
 find_cursor_result_type find_blocking(
-    UpdateAuxImpl const &, NodeCursor, NibblesView key, uint64_t version);
+    UpdateAux const &, NodeCursor, NibblesView key, uint64_t version,
+    timeline_id tid);
 
 /* This function reads a node from the specified physical offset `node_offset`,
 where the spare bits indicate the number of pages to read. It returns a valid
@@ -738,7 +531,8 @@ where the spare bits indicate the number of pages to read. It returns a valid
 becomes invalid.
 */
 Node::SharedPtr read_node_blocking(
-    UpdateAuxImpl const &, chunk_offset_t node_offset, uint64_t version);
+    UpdateAux const &, chunk_offset_t node_offset, uint64_t version,
+    timeline_id tid);
 
 //////////////////////////////////////////////////////////////////////////////
 // helpers
@@ -751,16 +545,19 @@ inline constexpr unsigned num_pages(file_offset_t const offset, unsigned bytes)
 
 inline compact_offset_pair calc_min_offsets(
     Node &node,
-    virtual_chunk_offset_t node_virtual_offset = INVALID_VIRTUAL_OFFSET)
+    virtual_chunk_offset_t const node_virtual_offset = INVALID_VIRTUAL_OFFSET)
 {
     compact_offset_pair ret;
     if (node_virtual_offset != INVALID_VIRTUAL_OFFSET) {
         auto &r = node_virtual_offset.in_fast_list() ? ret.fast : ret.slow;
         r = compact_virtual_chunk_offset_t{node_virtual_offset};
     }
-    for (unsigned i = 0; i < node.number_of_children(); ++i) {
-        ret.fast = std::min(ret.fast, node.min_offset_fast(i));
-        ret.slow = std::min(ret.slow, node.min_offset_slow(i));
+    unsigned const n = node.number_of_children();
+    auto const fast = node.child_min_offset_fast_data();
+    auto const slow = node.child_min_offset_slow_data();
+    for (unsigned i = 0; i < n; ++i) {
+        ret.fast = std::min<compact_virtual_chunk_offset_t>(ret.fast, fast[i]);
+        ret.slow = std::min<compact_virtual_chunk_offset_t>(ret.slow, slow[i]);
     }
     return ret;
 }

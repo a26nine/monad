@@ -15,75 +15,47 @@
 
 #pragma once
 
+#include <category/core/address.hpp>
+#include <category/core/assert.h>
+#include <category/core/bytes.hpp>
+#include <category/core/int.hpp>
 #include <category/core/runtime/uint256.hpp>
-#include <category/vm/core/assert.h>
+#include <category/vm/runtime/transmute/intrinsics.hpp>
 
 #include <evmc/evmc.h>
 #include <evmc/evmc.hpp>
 
-#include <immintrin.h>
-
-// Load `load_size` bytes from `src_buffer` and clear the remaining upper bytes
-// of the result. It is required that `load_size <= 32`. If `load_size <= 0`
-// then zero is returned.
-extern "C" __m256i
-monad_vm_runtime_load_bounded_le(uint8_t const *src_buffer, int64_t load_size);
-
-// Note: monad_vm_runtime_load_bounded_le_raw uses non-standard
-// calling convention. See transmute.S. Use the
-// monad_vm_runtime_load_bounded_le function for a version
-// using standard calling convention.
-extern "C" __m256i monad_vm_runtime_load_bounded_le_raw();
-
 namespace monad::vm::runtime
 {
     static_assert(sizeof(evmc_address) == 20);
-    static_assert(sizeof(evmc_bytes32) == 32);
+    static_assert(sizeof(bytes32_t) == 32);
     static_assert(sizeof(uint256_t) == 32);
 
     [[gnu::always_inline]]
     inline uint256_t
-    uint256_load_bounded_le(std::uint8_t const *bytes, std::int64_t max_len)
+    uint256_load_bounded_be(uint8_t const *const bytes, int64_t const max_len)
     {
-        if (MONAD_VM_LIKELY(max_len >= 32)) {
-            return uint256_t::load_le_unsafe(bytes);
-        }
-        return uint256_t{monad_vm_runtime_load_bounded_le(bytes, max_len)};
+        return bswap(uint256_load_bounded_le(bytes, max_len));
     }
 
     [[gnu::always_inline]]
-    inline uint256_t
-    uint256_load_bounded_be(std::uint8_t const *bytes, std::int64_t max_len)
+    inline Address address_from_uint256(uint256_t const &x)
     {
-        return uint256_load_bounded_le(bytes, max_len).to_be();
-    }
+        auto const *bytes = as_bytes(x);
 
-    [[gnu::always_inline]]
-    inline evmc::bytes32 bytes32_from_uint256(uint256_t const &x)
-    {
-        evmc_bytes32 ret;
-        x.store_be(ret.bytes);
-        return ret;
-    }
-
-    [[gnu::always_inline]]
-    inline evmc::address address_from_uint256(uint256_t const &x)
-    {
-        auto const *bytes = x.as_bytes();
-
-        std::uint64_t t2;
+        uint64_t t2;
         std::memcpy(&t2, bytes, 8);
         t2 = std::byteswap(t2);
 
-        std::uint64_t t1;
+        uint64_t t1;
         std::memcpy(&t1, bytes + 8, 8);
         t1 = std::byteswap(t1);
 
-        std::uint32_t t0;
+        uint32_t t0;
         std::memcpy(&t0, bytes + 16, 4);
         t0 = std::byteswap(t0);
 
-        evmc_address ret;
+        Address ret;
         std::memcpy(ret.bytes, &t0, 4);
         std::memcpy(ret.bytes + 4, &t1, 8);
         std::memcpy(ret.bytes + 12, &t2, 8);
@@ -91,23 +63,17 @@ namespace monad::vm::runtime
     }
 
     [[gnu::always_inline]]
-    inline uint256_t uint256_from_bytes32(evmc::bytes32 const &x)
+    inline uint256_t uint256_from_address(Address const &addr)
     {
-        return uint256_t::load_be(x.bytes);
-    }
-
-    [[gnu::always_inline]]
-    inline uint256_t uint256_from_address(evmc::address const &addr)
-    {
-        std::uint32_t t2;
+        uint32_t t2;
         std::memcpy(&t2, addr.bytes, 4);
         t2 = std::byteswap(t2);
 
-        std::uint64_t t1;
+        uint64_t t1;
         std::memcpy(&t1, addr.bytes + 4, 8);
         t1 = std::byteswap(t1);
 
-        std::uint64_t t0;
+        uint64_t t0;
         std::memcpy(&t0, addr.bytes + 12, 8);
         t0 = std::byteswap(t0);
 
@@ -119,12 +85,12 @@ namespace monad::vm::runtime
         return std::bit_cast<uint256_t>(ret);
     }
 
-    template <std::uint64_t N>
+    template <uint64_t N>
         requires(N < 64)
     [[gnu::always_inline]]
     constexpr bool is_bounded_by_bits(uint256_t const &x)
     {
-        static constexpr std::uint64_t mask = ~((std::uint64_t{1} << N) - 1);
+        static constexpr uint64_t mask = ~((uint64_t{1} << N) - 1);
         return ((x[0] & mask) | x[1] | x[2] | x[3]) == 0;
     }
 

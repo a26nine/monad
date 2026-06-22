@@ -107,7 +107,7 @@ public:
             return {};
         }
         auto encoded_storage = storage_leaf_res.value().node->value();
-        auto const storage = decode_storage_db_ignore_slot(encoded_storage);
+        auto const storage = decode_storage_db_ignore_key(encoded_storage);
         MONAD_ASSERT(!storage.has_error());
         return to_bytes(storage.value());
     }
@@ -132,13 +132,9 @@ public:
     }
 
     virtual void commit(
-        StateDeltas const &, Code const &, bytes32_t const &,
-        BlockHeader const &, std::vector<Receipt> const & = {},
-        std::vector<std::vector<CallFrame>> const & = {},
-        std::vector<Address> const & = {},
-        std::vector<Transaction> const & = {},
-        std::vector<BlockHeader> const & = {},
-        std::optional<std::vector<Withdrawal>> const & = std::nullopt) override
+        bytes32_t const &, CommitBuilder &, BlockHeader const &,
+        std::unique_ptr<StateDeltas>,
+        std::function<void(BlockHeader &)>) override
     {
         MONAD_ABORT();
     }

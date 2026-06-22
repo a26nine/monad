@@ -13,9 +13,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include <category/core/address.hpp>
 #include <category/core/byte_string.hpp>
-#include <category/core/int.hpp>
-#include <category/execution/ethereum/core/address.hpp>
+#include <category/core/bytes.hpp>
+#include <category/core/runtime/uint256.hpp>
 #include <category/execution/ethereum/core/contract/abi_decode.hpp>
 #include <category/execution/ethereum/core/contract/abi_decode_error.hpp>
 #include <category/execution/ethereum/core/contract/abi_encode.hpp>
@@ -23,12 +24,9 @@
 
 #include <limits>
 
-#include <evmc/evmc.hpp>
 #include <gtest/gtest.h>
-#include <intx/intx.hpp>
 
 using namespace monad;
-using namespace intx::literals;
 
 template <typename T>
 class UintDecodeTest : public ::testing::Test
@@ -152,6 +150,64 @@ TEST(AbiDecode, bytes_in_tail_length_mismatch)
     byte_string const encoded = abi_encode_bytes(to_byte_string_view(bytes));
     byte_string_view input{encoded};
     auto const decode_res = abi_decode_bytes_tail<48>(input);
+    ASSERT_TRUE(decode_res.has_error());
+    EXPECT_EQ(decode_res.assume_error(), AbiDecodeError::LengthMismatch);
+}
+
+TEST(AbiDecode, dynamic_bytes_tail_decodes_less_than_word)
+{
+    byte_string_fixed<8> bytes{};
+    bytes.fill(0xAB);
+    byte_string const encoded = abi_encode_bytes(to_byte_string_view(bytes));
+    byte_string_view input{encoded};
+    auto const decode_res = abi_decode_dynamic_bytes_tail<8>(input);
+    ASSERT_FALSE(decode_res.has_error());
+    EXPECT_TRUE(input.empty());
+    EXPECT_EQ(decode_res.value(), bytes);
+}
+
+TEST(AbiDecode, dynamic_bytes_tail_decodes_exactly_word)
+{
+    byte_string_fixed<32> bytes{};
+    bytes.fill(0xAB);
+    byte_string const encoded = abi_encode_bytes(to_byte_string_view(bytes));
+    byte_string_view input{encoded};
+    auto const decode_res = abi_decode_dynamic_bytes_tail<32>(input);
+    ASSERT_FALSE(decode_res.has_error());
+    EXPECT_TRUE(input.empty());
+    EXPECT_EQ(decode_res.value(), bytes);
+}
+
+TEST(AbiDecode, dynamic_bytes_tail_decodes_more_than_word)
+{
+    byte_string_fixed<48> bytes{};
+    bytes.fill(0xAB);
+    byte_string const encoded = abi_encode_bytes(to_byte_string_view(bytes));
+    byte_string_view input{encoded};
+    auto const decode_res = abi_decode_dynamic_bytes_tail<48>(input);
+    ASSERT_FALSE(decode_res.has_error());
+    EXPECT_TRUE(input.empty());
+    EXPECT_EQ(decode_res.value(), bytes);
+}
+
+TEST(AbiDecode, dynamic_bytes_tail_input_too_short)
+{
+    byte_string_fixed<8> bytes{};
+    bytes.fill(0xAB);
+    byte_string const encoded = abi_encode_bytes(to_byte_string_view(bytes));
+    byte_string_view input = byte_string_view{encoded}.substr(0, 32 + 4);
+    auto const decode_res = abi_decode_dynamic_bytes_tail<8>(input);
+    ASSERT_TRUE(decode_res.has_error());
+    EXPECT_EQ(decode_res.assume_error(), AbiDecodeError::InputTooShort);
+}
+
+TEST(AbiDecode, dynamic_bytes_tail_length_mismatch)
+{
+    byte_string_fixed<8> bytes{};
+    bytes.fill(0xAB);
+    byte_string const encoded = abi_encode_bytes(to_byte_string_view(bytes));
+    byte_string_view input{encoded};
+    auto const decode_res = abi_decode_dynamic_bytes_tail<32>(input);
     ASSERT_TRUE(decode_res.has_error());
     EXPECT_EQ(decode_res.assume_error(), AbiDecodeError::LengthMismatch);
 }

@@ -15,10 +15,10 @@
 
 #pragma once
 
+#include <category/core/address.hpp>
 #include <category/core/config.hpp>
 #include <category/core/result.hpp>
 #include <category/execution/ethereum/chain/chain.hpp>
-#include <category/execution/ethereum/core/address.hpp>
 #include <category/execution/ethereum/core/receipt.hpp>
 #include <category/execution/ethereum/execute_transaction.hpp>
 #include <category/execution/ethereum/trace/state_tracer.hpp>
@@ -50,6 +50,7 @@ Result<Receipt> dispatch_transaction(
     BlockHeader const &header, BlockHashBuffer const &block_hash_buffer,
     BlockState &block_state, BlockMetrics &block_metrics,
     boost::fibers::promise<void> &prev, CallTracerBase &call_tracer,
-    trace::StateTracer &state_tracer, ChainContext<traits> const &chain_ctx);
+    trace::StateTracer &state_tracer, ChainContext<traits> const &chain_ctx,
+    bool trace_transfers = false);
 
 MONAD_NAMESPACE_END

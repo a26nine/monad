@@ -17,6 +17,7 @@
 
 #include <category/vm/runtime/bin.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -32,25 +33,25 @@ namespace monad::vm::interpreter
         // PUSHN opcodes by reading data from _before_ the instruction
         // pointer with a single 32-byte read, then cleaning up any
         // over-read in the result value.
-        static constexpr std::size_t start_padding_size = 30;
+        static constexpr size_t start_padding_size = 30;
 
         // 32 for a truncated PUSH32, 1 for a STOP so that we don't have to
         // worry about going off the end.
-        static constexpr std::size_t end_padding_size = 32 + 1;
+        static constexpr size_t end_padding_size = 32 + 1;
 
     public:
         using JumpdestMap = std::vector<bool>;
 
-        explicit Intercode(std::span<std::uint8_t const> const);
+        explicit Intercode(std::span<uint8_t const> const);
 
-        Intercode(std::uint8_t const *code, std::size_t code_size)
-            : Intercode{std::span<std::uint8_t const>{code, code_size}}
+        Intercode(uint8_t const *const code, size_t const code_size)
+            : Intercode{std::span<uint8_t const>{code, code_size}}
         {
         }
 
         ~Intercode();
 
-        std::uint8_t const *code() const noexcept
+        uint8_t const *code() const noexcept
         {
             return padded_code_;
         }
@@ -70,20 +71,32 @@ namespace monad::vm::interpreter
             return {padded_code_, size_t{*code_size_}};
         }
 
-        bool is_jumpdest(std::size_t const pc) const noexcept
+        bool is_jumpdest(size_t const pc) const noexcept
         {
             return pc < *code_size_ && jumpdest_map_[pc];
         }
 
+        [[gnu::always_inline]]
+        size_t copy_code(
+            size_t const offset, uint8_t *const buffer,
+            size_t const buffer_size) const
+        {
+            auto const code_size = size();
+            if (offset > code_size) {
+                return 0;
+            }
+            auto const n = std::min(code_size - offset, buffer_size);
+            std::copy_n(code() + offset, n, buffer);
+            return n;
+        }
+
     private:
-        std::uint8_t const *padded_code_;
+        uint8_t const *padded_code_;
         code_size_t code_size_;
         JumpdestMap jumpdest_map_;
 
-        static std::uint8_t const *
-        pad(std::span<std::uint8_t const> const code);
+        static uint8_t const *pad(std::span<uint8_t const> code);
 
-        static JumpdestMap
-        find_jumpdests(std::span<std::uint8_t const> const code);
+        static JumpdestMap find_jumpdests(std::span<uint8_t const> code);
     };
 }

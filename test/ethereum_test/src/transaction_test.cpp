@@ -13,10 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#include <from_json.hpp>
+#include <category/core/log.hpp>
 #include <revision_map.hpp>
 #include <transaction_test.hpp>
 
+#include <category/core/address.hpp>
 #include <category/core/assert.h>
 #include <category/core/byte_string.hpp>
 #include <category/core/config.hpp>
@@ -35,12 +36,11 @@
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 
-#include <quill/bundled/fmt/core.h>
-#include <quill/detail/LogMacros.h>
-
 #include <gtest/gtest.h>
 
 #include <test_resource_data.h>
+
+#include <test/utils/from_json.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -68,8 +68,7 @@ void process_transaction(Transaction const &txn, nlohmann::json const &expected)
             EXPECT_FALSE(expected.contains("exception"));
 
             // check sender
-            EXPECT_EQ(
-                sender.value(), expected.at("sender").get<evmc::address>());
+            EXPECT_EQ(sender.value(), expected.at("sender").get<Address>());
 
             // check gas
             EXPECT_EQ(
@@ -80,17 +79,18 @@ void process_transaction(Transaction const &txn, nlohmann::json const &expected)
 }
 
 void process_transaction(
-    std::variant<evmc_revision, monad_revision> const &revision,
+    std::variant<monad_eth_revision, monad_revision> const &revision,
     Transaction const &txn, nlohmann::json const &expected)
 {
-    if (std::holds_alternative<evmc_revision>(revision)) {
-        auto const rev = std::get<evmc_revision>(revision);
-        MONAD_ASSERT(rev != EVMC_CONSTANTINOPLE);
+    if (std::holds_alternative<monad_eth_revision>(revision)) {
+        auto const rev = std::get<monad_eth_revision>(revision);
         SWITCH_EVM_TRAITS(process_transaction, txn, expected);
+        MONAD_ASSERT(false);
     }
     else {
         auto const rev = std::get<monad_revision>(revision);
         SWITCH_MONAD_TRAITS(process_transaction, txn, expected);
+        MONAD_ASSERT(false);
     }
 }
 
@@ -154,7 +154,8 @@ void TransactionTest::TestBody()
 
 void register_transaction_tests_path(
     std::filesystem::path const &root,
-    std::optional<std::variant<evmc_revision, monad_revision>> const &revision)
+    std::optional<std::variant<monad_eth_revision, monad_revision>> const
+        &revision)
 {
     namespace fs = std::filesystem;
     MONAD_ASSERT(fs::exists(root));
@@ -194,7 +195,8 @@ void register_transaction_tests_path(
 }
 
 void register_transaction_tests(
-    std::optional<std::variant<evmc_revision, monad_revision>> const &revision)
+    std::optional<std::variant<monad_eth_revision, monad_revision>> const
+        &revision)
 {
     register_transaction_tests_path(
         test_resource::ethereum_tests_dir / "TransactionTests", revision);

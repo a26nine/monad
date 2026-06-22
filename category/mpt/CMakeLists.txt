@@ -28,7 +28,7 @@ option(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ##############################################################################
 
 find_package(Boost 1.83 # 1.83 really is the minimum
-             CONFIG REQUIRED COMPONENTS context fiber json thread)
+             CONFIG REQUIRED COMPONENTS context json thread)
 find_package(GTest)
 
 pkg_check_modules(archive REQUIRED IMPORTED_TARGET libarchive)
@@ -47,6 +47,8 @@ add_library(
   "db.cpp"
   "db.hpp"
   "db_error.hpp"
+  "db_metadata_context.cpp"
+  "db_metadata_context.hpp"
   "find.cpp"
   "find_notify_fiber.cpp"
   "find_request_sender.hpp"
@@ -60,6 +62,8 @@ add_library(
   "request.hpp"
   "read_node_blocking.cpp"
   "state_machine.hpp"
+  "state_machine_kind.cpp"
+  "state_machine_kind.hpp"
   "traverse.hpp"
   "traverse_util.hpp"
   "trie.cpp"
@@ -78,6 +82,9 @@ add_executable(monad-mpt "cli_tool_main.cpp" "cli_tool_impl.cpp")
 monad_compile_options(monad-mpt)
 target_link_libraries(monad-mpt PUBLIC monad_execution PkgConfig::zstd
                                        PkgConfig::archive CLI11::CLI11)
+
+target_compile_definitions(monad-mpt
+                           PRIVATE GIT_COMMIT_HASH="${GIT_COMMIT_HASH}")
 
 function(add_trie_test)
   set(ONE_VALUE_ARGS TARGET TEST_FILTER)

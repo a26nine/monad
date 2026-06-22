@@ -15,9 +15,14 @@
 
 #include <boost/fiber/future/promise.hpp>
 #include <boost/outcome/try.hpp>
+#include <category/core/address.hpp>
 #include <category/core/assert.h>
+#include <category/core/byte_string.hpp>
+#include <category/core/config.hpp>
+#include <category/core/int.hpp>
+#include <category/core/likely.h>
+#include <category/core/result.hpp>
 #include <category/execution/ethereum/chain/chain.hpp>
-#include <category/execution/ethereum/core/contract/abi_signatures.hpp>
 #include <category/execution/ethereum/core/transaction.hpp>
 #include <category/execution/ethereum/event/record_txn_events.hpp>
 #include <category/execution/ethereum/metrics/block_metrics.hpp>
@@ -25,6 +30,7 @@
 #include <category/execution/ethereum/state3/state.hpp>
 #include <category/execution/ethereum/trace/call_tracer.hpp>
 #include <category/execution/ethereum/trace/event_trace.hpp>
+#include <category/execution/ethereum/trace/state_tracer.hpp>
 #include <category/execution/ethereum/validate_transaction.hpp>
 #include <category/execution/monad/execute_system_transaction.hpp>
 #include <category/execution/monad/staking/staking_contract.hpp>
@@ -33,26 +39,11 @@
 #include <category/execution/monad/validate_system_transaction.hpp>
 #include <category/vm/evm/explicit_traits.hpp>
 #include <category/vm/evm/traits.hpp>
+#include <evmc/evmc.h>
+
+#include <cstdint>
 
 #include <optional>
-
-MONAD_ANONYMOUS_NAMESPACE_BEGIN
-
-struct SyscallSelector
-{
-    static constexpr uint32_t REWARD =
-        abi_encode_selector("syscallReward(address)");
-    static constexpr uint32_t SNAPSHOT =
-        abi_encode_selector("syscallSnapshot()");
-    static constexpr uint32_t ON_EPOCH_CHANGE =
-        abi_encode_selector("syscallOnEpochChange(uint64)");
-};
-
-static_assert(SyscallSelector::REWARD == 0x791bdcf3);
-static_assert(SyscallSelector::SNAPSHOT == 0x157eeb21);
-static_assert(SyscallSelector::ON_EPOCH_CHANGE == 0x1d4e9f02);
-
-MONAD_ANONYMOUS_NAMESPACE_END
 
 MONAD_NAMESPACE_BEGIN
 
@@ -111,6 +102,7 @@ Result<Receipt> ExecuteSystemTransaction<traits>::operator()()
         state.set_original_nonce(sender_, tx_.nonce);
 
         call_tracer_.reset();
+        trace::reset(state_tracer_);
 
         auto result = execute(state);
 
@@ -135,6 +127,7 @@ Result<Receipt> ExecuteSystemTransaction<traits>::operator()()
         State state{block_state_, Incarnation{header_.number, i_ + 1}};
 
         call_tracer_.reset();
+        trace::reset(state_tracer_);
 
         auto result = execute(state);
 
@@ -162,14 +155,13 @@ evmc_message ExecuteSystemTransaction<traits>::to_message() const
         .sender = sender_,
         .input_data = tx_.data.data(),
         .input_size = tx_.data.size(),
-        .value = {},
+        .value = store_be_as<evmc::uint256be>(tx_.value),
         .create2_salt = {},
         .code_address = *tx_.to,
         .memory_handle = nullptr,
         .memory = nullptr,
         .memory_capacity = 0,
     };
-    intx::be::store(msg.value.bytes, tx_.value);
     return msg;
 }
 
@@ -221,15 +213,15 @@ Result<void> ExecuteSystemTransaction<traits>::execute_staking_syscall(
     }
 
     auto const signature =
-        intx::be::unsafe::load<uint32_t>(calldata.substr(0, 4).data());
+        load_be_unsafe<uint32_t>(calldata.substr(0, 4).data());
     calldata.remove_prefix(4);
 
     switch (signature) {
-    case SyscallSelector::REWARD:
+    case staking::selector::REWARD:
         return contract.syscall_reward<traits>(calldata, value);
-    case SyscallSelector::SNAPSHOT:
+    case staking::selector::SNAPSHOT:
         return contract.syscall_snapshot(calldata, value);
-    case SyscallSelector::ON_EPOCH_CHANGE:
+    case staking::selector::ON_EPOCH_CHANGE:
         return contract.syscall_on_epoch_change(calldata, value);
     }
     return staking::StakingError::MethodNotSupported;

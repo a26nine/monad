@@ -19,15 +19,11 @@
 #include <category/core/hex.hpp>
 #include <category/core/int.hpp>
 #include <category/core/likely.h>
-#include <category/core/result.hpp>
 #include <category/execution/ethereum/chain/ethereum_mainnet_alloc.hpp>
+#include <category/execution/ethereum/chain/genesis_state.hpp>
 #include <category/execution/ethereum/core/block.hpp>
-#include <category/execution/ethereum/core/fmt/bytes_fmt.hpp>
 #include <category/execution/ethereum/execute_transaction.hpp>
-#include <category/execution/ethereum/precompiles.hpp>
-#include <category/execution/ethereum/state3/state.hpp>
 #include <category/execution/ethereum/validate_block.hpp>
-#include <category/execution/ethereum/validate_transaction.hpp>
 
 #include <evmc/evmc.h>
 
@@ -35,7 +31,8 @@
 #include <boost/outcome/success_failure.hpp>
 #include <boost/outcome/try.hpp>
 
-#include <limits>
+#include <cstdint>
+#include <optional>
 
 MONAD_NAMESPACE_BEGIN
 
@@ -46,45 +43,31 @@ uint256_t EthereumMainnet::get_chain_id() const
     return 1;
 };
 
-evmc_revision EthereumMainnet::get_revision(
+monad_eth_revision EthereumMainnet::get_revision(
     uint64_t const block_number, uint64_t const timestamp) const
 {
-    // TODO: update to include Prague once we can replay those blocks
-
-    if (MONAD_LIKELY(timestamp >= 1710338135)) {
-        return EVMC_CANCUN;
+    if (MONAD_LIKELY(timestamp >= 1746612311)) {
+        return MONAD_ETH_PRAGUE;
+    }
+    else if (timestamp >= 1710338135) {
+        return MONAD_ETH_CANCUN;
     }
     else if (timestamp >= 1681338455) {
-        return EVMC_SHANGHAI;
+        return MONAD_ETH_SHANGHAI;
     }
     else if (block_number >= 15537394) {
-        return EVMC_PARIS;
+        return MONAD_ETH_PARIS;
     }
     else if (block_number >= 12965000) {
-        return EVMC_LONDON;
+        return MONAD_ETH_LONDON;
     }
     else if (block_number >= 12244000) {
-        return EVMC_BERLIN;
+        return MONAD_ETH_BERLIN;
     }
     else if (block_number >= 9069000) {
-        return EVMC_ISTANBUL;
+        return MONAD_ETH_ISTANBUL;
     }
-    else if (block_number >= 7280000) {
-        return EVMC_PETERSBURG;
-    }
-    else if (block_number >= 4370000) {
-        return EVMC_BYZANTIUM;
-    }
-    else if (block_number >= 2675000) {
-        return EVMC_SPURIOUS_DRAGON;
-    }
-    else if (block_number >= 2463000) {
-        return EVMC_TANGERINE_WHISTLE;
-    }
-    else if (block_number >= 1150000) {
-        return EVMC_HOMESTEAD;
-    }
-    return EVMC_FRONTIER;
+    MONAD_ASSERT(false, "unsupported fork");
 }
 
 GenesisState EthereumMainnet::get_genesis_state() const
@@ -92,7 +75,7 @@ GenesisState EthereumMainnet::get_genesis_state() const
     BlockHeader header;
     header.difficulty = 17179869184;
     header.gas_limit = 5000;
-    intx::be::unsafe::store<uint64_t>(header.nonce.data(), 66);
+    store_be(header.nonce.data(), uint64_t{66});
     header.extra_data = from_hex("0x11bbe8db4e347b4e8c937c1c8370e4b5ed33a"
                                  "db3db69cbdb7a38e1e50b1b82fa")
                             .value();

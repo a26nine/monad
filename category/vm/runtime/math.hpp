@@ -15,36 +15,19 @@
 
 #pragma once
 
+#include <category/core/assert.h>
 #include <category/core/runtime/uint256.hpp>
-#include <category/vm/core/assert.h>
 #include <category/vm/evm/traits.hpp>
+#include <category/vm/runtime/math/intrinsics.hpp>
 #include <category/vm/runtime/types.hpp>
 
 #include <evmc/evmc.hpp>
 
-// It is assumed that if the `result` pointer overlaps with `left` and/or
-// `right`, then `result` pointer is equal to `left` and/or `right`.
-extern "C" void monad_vm_runtime_mul(
-    monad::vm::runtime::uint256_t *result,
-    monad::vm::runtime::uint256_t const *left,
-    monad::vm::runtime::uint256_t const *right) noexcept;
-
-// It is assumed that if the `result` pointer overlaps with `left` and/or
-// `right`, then `result` pointer is equal to `left` and/or `right`.
-extern "C" void monad_vm_runtime_mul_192(
-    monad::vm::runtime::uint256_t *result,
-    monad::vm::runtime::uint256_t const *left,
-    monad::vm::runtime::uint256_t const *right) noexcept;
-
 namespace monad::vm::runtime
 {
-    constexpr void (*mul)(
-        uint256_t *, uint256_t const *,
-        uint256_t const *) noexcept = monad_vm_runtime_mul;
-
     constexpr void udiv(
-        uint256_t *result_ptr, uint256_t const *a_ptr,
-        uint256_t const *b_ptr) noexcept
+        uint256_t *const result_ptr, uint256_t const *const a_ptr,
+        uint256_t const *const b_ptr) noexcept
     {
         if (*b_ptr == 0) {
             *result_ptr = 0;
@@ -55,8 +38,8 @@ namespace monad::vm::runtime
     }
 
     constexpr void sdiv(
-        uint256_t *result_ptr, uint256_t const *a_ptr,
-        uint256_t const *b_ptr) noexcept
+        uint256_t *const result_ptr, uint256_t const *const a_ptr,
+        uint256_t const *const b_ptr) noexcept
     {
         if (*b_ptr == 0) {
             *result_ptr = 0;
@@ -67,8 +50,8 @@ namespace monad::vm::runtime
     }
 
     constexpr void umod(
-        uint256_t *result_ptr, uint256_t const *a_ptr,
-        uint256_t const *b_ptr) noexcept
+        uint256_t *const result_ptr, uint256_t const *const a_ptr,
+        uint256_t const *const b_ptr) noexcept
     {
         if (*b_ptr == 0) {
             *result_ptr = 0;
@@ -79,8 +62,8 @@ namespace monad::vm::runtime
     }
 
     constexpr void smod(
-        uint256_t *result_ptr, uint256_t const *a_ptr,
-        uint256_t const *b_ptr) noexcept
+        uint256_t *const result_ptr, uint256_t const *const a_ptr,
+        uint256_t const *const b_ptr) noexcept
     {
         if (*b_ptr == 0) {
             *result_ptr = 0;
@@ -91,8 +74,8 @@ namespace monad::vm::runtime
     }
 
     constexpr void addmod(
-        uint256_t *result_ptr, uint256_t const *a_ptr, uint256_t const *b_ptr,
-        uint256_t const *n_ptr) noexcept
+        uint256_t *const result_ptr, uint256_t const *const a_ptr,
+        uint256_t const *const b_ptr, uint256_t const *const n_ptr) noexcept
     {
         if (*n_ptr == 0) {
             *result_ptr = 0;
@@ -103,8 +86,8 @@ namespace monad::vm::runtime
     }
 
     constexpr void mulmod(
-        uint256_t *result_ptr, uint256_t const *a_ptr, uint256_t const *b_ptr,
-        uint256_t const *n_ptr) noexcept
+        uint256_t *const result_ptr, uint256_t const *const a_ptr,
+        uint256_t const *const b_ptr, uint256_t const *const n_ptr) noexcept
     {
         if (*n_ptr == 0) {
             *result_ptr = 0;
@@ -118,12 +101,8 @@ namespace monad::vm::runtime
     [[gnu::always_inline]]
     inline constexpr uint32_t exp_dynamic_gas_cost_multiplier() noexcept
     {
-        if (traits::evm_rev() >= EVMC_SPURIOUS_DRAGON) {
-            return 50;
-        }
-        else {
-            return 10;
-        }
+        static_assert(traits::evm_rev() >= MONAD_ETH_SPURIOUS_DRAGON);
+        return 50;
     }
 
     template <Traits traits>

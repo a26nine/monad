@@ -13,26 +13,19 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include <category/core/address.hpp>
 #include <category/core/byte_string.hpp>
 #include <category/core/bytes.hpp>
 #include <category/core/int.hpp>
+#include <category/core/runtime/uint256.hpp>
 #include <category/execution/ethereum/chain/ethereum_mainnet.hpp>
-#include <category/execution/ethereum/core/account.hpp>
-#include <category/execution/ethereum/core/address.hpp>
 #include <category/execution/ethereum/core/block.hpp>
 #include <category/execution/ethereum/core/transaction.hpp>
-#include <category/execution/ethereum/dao.hpp>
 #include <category/execution/ethereum/db/trie_db.hpp>
 #include <category/execution/ethereum/db/util.hpp>
-#include <category/execution/ethereum/state2/block_state.hpp>
-#include <category/execution/ethereum/state3/state.hpp>
 #include <category/execution/ethereum/test/test_traits_state.hpp>
-#include <category/execution/ethereum/types/incarnation.hpp>
 #include <category/execution/ethereum/validate_block.hpp>
 #include <category/execution/ethereum/validate_transaction.hpp>
-#include <category/mpt/db.hpp>
-#include <category/vm/evm/traits.hpp>
-#include <category/vm/vm.hpp>
 #include <monad/test/traits_test.hpp>
 
 #include <evmc/evmc.h>
@@ -40,26 +33,25 @@
 
 #include <gtest/gtest.h>
 
-#include <intx/intx.hpp>
-
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <type_traits>
 
 using namespace monad;
 
 namespace
 {
     using namespace ::monad::literals;
-    using intx::operator""_u256;
 
     static constexpr auto r{
         0x5fd883bb01a10915ebc06621b925bd6d624cb6768976b73c0d468b31f657d15b_u256};
     static constexpr auto s{
         0x121d855c539a23aadf6f06ac21165db1ad5efd261842e82a719c9863ca4ac04c_u256};
 
-    template <evmc_revision r>
-    using rev = std::integral_constant<evmc_revision, r>;
+    template <monad_eth_revision r>
+    using rev = std::integral_constant<monad_eth_revision, r>;
 
     static constexpr auto sender =
         0x000000000000000000000000000000000000000a_address;
@@ -70,6 +62,8 @@ namespace
 
 TYPED_TEST(TraitsTest, validate_enough_gas)
 {
+    static_assert(TestFixture::Trait::evm_rev() >= MONAD_ETH_HOMESTEAD);
+
     static Transaction const t{
         .sc = {.r = r, .s = s},
         .max_fee_per_gas = 29'443'849'433,
@@ -80,28 +74,15 @@ TYPED_TEST(TraitsTest, validate_enough_gas)
         static_validate_transaction<typename TestFixture::Trait>(
             t, 0, std::nullopt, 1);
 
-    if constexpr (TestFixture::Trait::evm_rev() == EVMC_FRONTIER) {
-        EXPECT_TRUE(result.has_value());
-    }
-    else {
-        ASSERT_TRUE(result.has_error());
-        EXPECT_EQ(
-            result.error(), TransactionError::IntrinsicGasGreaterThanLimit);
-    }
+    ASSERT_TRUE(result.has_error());
+    EXPECT_EQ(result.error(), TransactionError::IntrinsicGasGreaterThanLimit);
 }
 
 TYPED_TEST(TraitsTest, validate_floor_gas)
 {
-    static constexpr auto gas_limit = [] {
-        // intrinsic gas requirement was much higher pre Istanbul due to 68 gas
-        // cost per non-zero data vs 16 gas post Istanbul
-        if constexpr (TestFixture::Trait::evm_rev() >= EVMC_ISTANBUL) {
-            return 300'000;
-        }
-        else {
-            return 800'000;
-        }
-    }();
+    static_assert(TestFixture::Trait::evm_rev() >= MONAD_ETH_ISTANBUL);
+
+    static constexpr auto gas_limit = 300'000;
     Transaction const t{
         .sc = {.r = r, .s = s},
         .gas_limit = gas_limit,
@@ -112,7 +93,7 @@ TYPED_TEST(TraitsTest, validate_floor_gas)
         static_validate_transaction<typename TestFixture::Trait>(
             t, 0, std::nullopt, 1);
 
-    if constexpr (TestFixture::Trait::evm_rev() >= EVMC_PRAGUE) {
+    if constexpr (TestFixture::Trait::evm_rev() >= MONAD_ETH_PRAGUE) {
         // Floor gas only introduced since Prague
         ASSERT_TRUE(result.has_error());
         EXPECT_EQ(
@@ -130,9 +111,10 @@ TYPED_TEST(InMemoryStateTraitsTest, validate_deployed_code)
     this->state.set_code(sender, 0x00_bytes);
     Transaction const tx{.gas_limit = 60'500};
 
+    trace::StateTracer noop_state_tracer = std::monostate{};
     auto const result =
         validate_ethereum_transaction<typename TestFixture::Trait>(
-            tx, sender, this->state);
+            tx, sender, this->state, noop_state_tracer);
     ASSERT_TRUE(result.has_error());
     EXPECT_EQ(result.error(), TransactionError::SenderNotEoa);
 }
@@ -145,10 +127,11 @@ TYPED_TEST(InMemoryStateTraitsTest, validate_deployed_code_delegated)
         sender, 0xEF01001122334455112233445511223344551122334455_bytes);
     Transaction const tx{.gas_limit = 60'500};
 
+    trace::StateTracer noop_state_tracer = std::monostate{};
     auto const result =
         validate_ethereum_transaction<typename TestFixture::Trait>(
-            tx, sender, this->state);
-    if constexpr (TestFixture::Trait::evm_rev() >= EVMC_PRAGUE) {
+            tx, sender, this->state, noop_state_tracer);
+    if constexpr (TestFixture::Trait::evm_rev() >= MONAD_ETH_PRAGUE) {
         EXPECT_TRUE(result.has_value());
     }
     else {
@@ -167,9 +150,10 @@ TYPED_TEST(InMemoryStateTraitsTest, validate_nonce)
         .gas_limit = 60'500,
         .value = 55'939'568'773'815'811};
 
+    trace::StateTracer noop_state_tracer = std::monostate{};
     auto const result =
         validate_ethereum_transaction<typename TestFixture::Trait>(
-            tx, sender, this->state);
+            tx, sender, this->state, noop_state_tracer);
     ASSERT_TRUE(result.has_error());
     EXPECT_EQ(result.error(), TransactionError::BadNonce);
 }
@@ -184,9 +168,10 @@ TYPED_TEST(InMemoryStateTraitsTest, validate_nonce_optimistically)
         .gas_limit = 60'500,
         .value = 55'939'568'773'815'811};
 
+    trace::StateTracer noop_state_tracer = std::monostate{};
     auto const result =
         validate_ethereum_transaction<typename TestFixture::Trait>(
-            tx, sender, this->state);
+            tx, sender, this->state, noop_state_tracer);
     ASSERT_TRUE(result.has_error());
     EXPECT_EQ(result.error(), TransactionError::BadNonce);
 }
@@ -202,9 +187,10 @@ TYPED_TEST(InMemoryStateTraitsTest, validate_enough_balance)
         .max_priority_fee_per_gas = 100'000'000,
     };
 
+    trace::StateTracer noop_state_tracer = std::monostate{};
     auto const result =
         validate_ethereum_transaction<typename TestFixture::Trait>(
-            tx, sender, this->state);
+            tx, sender, this->state, noop_state_tracer);
     ASSERT_TRUE(result.has_error());
     EXPECT_EQ(result.error(), TransactionError::InsufficientBalance);
 }
@@ -226,10 +212,30 @@ TYPED_TEST(InMemoryStateTraitsTest, successful_validation)
             tx, 0, std::nullopt, 1);
     EXPECT_TRUE(result1.has_value());
 
+    trace::StateTracer noop_state_tracer = std::monostate{};
     auto const result2 =
         validate_ethereum_transaction<typename TestFixture::Trait>(
-            tx, sender, this->state);
+            tx, sender, this->state, noop_state_tracer);
     EXPECT_TRUE(result2.has_value());
+}
+
+TYPED_TEST(TraitsTest, invalid_signature)
+{
+    // A transaction that passes every earlier static check but carries a bad
+    // r/s must be rejected with InvalidSignature (EIP-2).
+    static Transaction const t{
+        .sc = {.r = 0, .s = s},
+        .nonce = 25,
+        .max_fee_per_gas = 29'443'849'433,
+        .gas_limit = 27'500,
+        .value = 1,
+        .to = to};
+
+    auto const result =
+        static_validate_transaction<typename TestFixture::Trait>(
+            t, 0, std::nullopt, 1);
+    ASSERT_TRUE(result.has_error());
+    EXPECT_EQ(result.error(), TransactionError::InvalidSignature);
 }
 
 TYPED_TEST(TraitsTest, max_fee_less_than_base)
@@ -275,9 +281,10 @@ TYPED_TEST(InMemoryStateTraitsTest, insufficent_balance_overflow)
         .value = 0,
         .to = to};
 
+    trace::StateTracer noop_state_tracer = std::monostate{};
     auto const result =
         validate_ethereum_transaction<typename TestFixture::Trait>(
-            tx, sender, this->state);
+            tx, sender, this->state, noop_state_tracer);
     ASSERT_TRUE(result.has_error());
     EXPECT_EQ(result.error(), TransactionError::InsufficientBalance);
 }
@@ -285,37 +292,31 @@ TYPED_TEST(InMemoryStateTraitsTest, insufficent_balance_overflow)
 // EIP-3860
 TYPED_TEST(TraitsTest, init_code_exceed_limit)
 {
-    // Before Spurious Dragon, max_code_size is uncapped
-    if constexpr (TestFixture::Trait::evm_rev() >= EVMC_SPURIOUS_DRAGON) {
-        byte_string long_data;
-        for (auto i = 0u; i <= 2 * TestFixture::Trait::max_code_size(); ++i) {
-            long_data += {0xc0};
-        }
-        // exceed EIP-3860 limit
+    static_assert(TestFixture::Trait::evm_rev() >= MONAD_ETH_SPURIOUS_DRAGON);
 
-        static Transaction const t{
-            .sc = {.r = r, .s = s},
-            .max_fee_per_gas = 0,
-            .gas_limit = 20'000'000,
-            .value = 0,
-            .data = long_data};
+    byte_string long_data;
+    for (auto i = 0u; i <= 2 * TestFixture::Trait::max_code_size(); ++i) {
+        long_data += {0xc0};
+    }
+    // exceed EIP-3860 limit
 
-        auto const result =
-            static_validate_transaction<typename TestFixture::Trait>(
-                t, 0, std::nullopt, 1);
-        // init codesize validation since EIP-3860
-        if constexpr (TestFixture::Trait::evm_rev() >= EVMC_SHANGHAI) {
-            ASSERT_TRUE(result.has_error());
-            EXPECT_EQ(result.error(), TransactionError::InitCodeLimitExceeded);
-        }
-        else {
-            EXPECT_TRUE(result.has_value());
-        }
+    static Transaction const t{
+        .sc = {.r = r, .s = s},
+        .max_fee_per_gas = 0,
+        .gas_limit = 20'000'000,
+        .value = 0,
+        .data = long_data};
+
+    auto const result =
+        static_validate_transaction<typename TestFixture::Trait>(
+            t, 0, std::nullopt, 1);
+    // init codesize validation since EIP-3860
+    if constexpr (TestFixture::Trait::evm_rev() >= MONAD_ETH_SHANGHAI) {
+        ASSERT_TRUE(result.has_error());
+        EXPECT_EQ(result.error(), TransactionError::InitCodeLimitExceeded);
     }
     else {
-        static_assert(
-            TestFixture::Trait::max_code_size() ==
-            std::numeric_limits<size_t>::max());
+        EXPECT_TRUE(result.has_value());
     }
 }
 
@@ -327,19 +328,6 @@ TYPED_TEST(TraitsTest, invalid_gas_limit)
         static_validate_header<typename TestFixture::Trait>(header);
     ASSERT_TRUE(result.has_error());
     EXPECT_EQ(result.error(), BlockError::InvalidGasLimit);
-}
-
-TYPED_TEST(EvmTraitsTest, wrong_dao_extra_data)
-{
-    static BlockHeader const header{
-        .number = dao::dao_block_number + 5,
-        .gas_limit = 10000,
-        .extra_data = {0x00, 0x01, 0x02}};
-
-    auto const result =
-        static_validate_header<typename TestFixture::Trait>(header);
-    ASSERT_TRUE(result.has_error());
-    EXPECT_EQ(result.error(), BlockError::WrongDaoExtraData);
 }
 
 #define TEST_OPTIONAL_FIELD(f, default_val, REV)                               \
@@ -368,8 +356,8 @@ TYPED_TEST(EvmTraitsTest, wrong_dao_extra_data)
 
 TYPED_TEST(TraitsTest, optional_fields_existence)
 {
-    auto value_since = []<evmc_revision rev, typename T>(
-                           std::integral_constant<evmc_revision, rev>,
+    auto value_since = []<monad_eth_revision rev, typename T>(
+                           std::integral_constant<monad_eth_revision, rev>,
                            T val) consteval {
         if constexpr (TestFixture::Trait::evm_rev() >= rev) {
             return std::optional<T>{val};
@@ -380,17 +368,17 @@ TYPED_TEST(TraitsTest, optional_fields_existence)
     };
 
     static constexpr auto base_fee_per_gas =
-        value_since(rev<EVMC_LONDON>{}, uint256_t{});
+        value_since(rev<MONAD_ETH_LONDON>{}, uint256_t{});
     static constexpr auto withdrawals_root =
-        value_since(rev<EVMC_SHANGHAI>{}, bytes32_t{});
+        value_since(rev<MONAD_ETH_SHANGHAI>{}, bytes32_t{});
     static constexpr auto blob_gas_used =
-        value_since(rev<EVMC_CANCUN>{}, uint64_t{});
+        value_since(rev<MONAD_ETH_CANCUN>{}, uint64_t{});
     static constexpr auto excess_blob_gas =
-        value_since(rev<EVMC_CANCUN>{}, uint64_t{});
+        value_since(rev<MONAD_ETH_CANCUN>{}, uint64_t{});
     static constexpr auto parent_beacon_block_root =
-        value_since(rev<EVMC_CANCUN>{}, bytes32_t{});
+        value_since(rev<MONAD_ETH_CANCUN>{}, bytes32_t{});
     static constexpr auto requests_hash =
-        value_since(rev<EVMC_PRAGUE>{}, bytes32_t{});
+        value_since(rev<MONAD_ETH_PRAGUE>{}, bytes32_t{});
 
     static constexpr BlockHeader valid_header{
         .gas_limit = 10000,
@@ -406,20 +394,20 @@ TYPED_TEST(TraitsTest, optional_fields_existence)
         static_validate_header<typename TestFixture::Trait>(valid_header)
             .has_value());
 
-    TEST_OPTIONAL_FIELD(base_fee_per_gas, uint256_t{}, EVMC_LONDON)
-    TEST_OPTIONAL_FIELD(withdrawals_root, bytes32_t{}, EVMC_SHANGHAI)
-    TEST_OPTIONAL_FIELD(blob_gas_used, uint64_t{}, EVMC_CANCUN)
-    TEST_OPTIONAL_FIELD(excess_blob_gas, uint64_t{}, EVMC_CANCUN)
-    TEST_OPTIONAL_FIELD(parent_beacon_block_root, bytes32_t{}, EVMC_CANCUN)
-    TEST_OPTIONAL_FIELD(requests_hash, bytes32_t{}, EVMC_PRAGUE)
+    TEST_OPTIONAL_FIELD(base_fee_per_gas, uint256_t{}, MONAD_ETH_LONDON)
+    TEST_OPTIONAL_FIELD(withdrawals_root, bytes32_t{}, MONAD_ETH_SHANGHAI)
+    TEST_OPTIONAL_FIELD(blob_gas_used, uint64_t{}, MONAD_ETH_CANCUN)
+    TEST_OPTIONAL_FIELD(excess_blob_gas, uint64_t{}, MONAD_ETH_CANCUN)
+    TEST_OPTIONAL_FIELD(parent_beacon_block_root, bytes32_t{}, MONAD_ETH_CANCUN)
+    TEST_OPTIONAL_FIELD(requests_hash, bytes32_t{}, MONAD_ETH_PRAGUE)
 }
 
 #undef TEST_OPTIONAL_FIELD
 
 TYPED_TEST(TraitsTest, invalid_nonce)
 {
-    auto value_since = []<evmc_revision rev, typename T>(
-                           std::integral_constant<evmc_revision, rev>,
+    auto value_since = []<monad_eth_revision rev, typename T>(
+                           std::integral_constant<monad_eth_revision, rev>,
                            T val) consteval {
         if constexpr (TestFixture::Trait::evm_rev() >= rev) {
             return std::optional<T>{val};
@@ -433,17 +421,17 @@ TYPED_TEST(TraitsTest, invalid_nonce)
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
 
     static constexpr auto base_fee_per_gas =
-        value_since(rev<EVMC_LONDON>{}, uint256_t{});
+        value_since(rev<MONAD_ETH_LONDON>{}, uint256_t{});
     static constexpr auto withdrawals_root =
-        value_since(rev<EVMC_SHANGHAI>{}, bytes32_t{});
+        value_since(rev<MONAD_ETH_SHANGHAI>{}, bytes32_t{});
     static constexpr auto blob_gas_used =
-        value_since(rev<EVMC_CANCUN>{}, uint64_t{});
+        value_since(rev<MONAD_ETH_CANCUN>{}, uint64_t{});
     static constexpr auto excess_blob_gas =
-        value_since(rev<EVMC_CANCUN>{}, uint64_t{});
+        value_since(rev<MONAD_ETH_CANCUN>{}, uint64_t{});
     static constexpr auto parent_beacon_block_root =
-        value_since(rev<EVMC_CANCUN>{}, bytes32_t{});
+        value_since(rev<MONAD_ETH_CANCUN>{}, bytes32_t{});
     static constexpr auto requests_hash =
-        value_since(rev<EVMC_PRAGUE>{}, bytes32_t{});
+        value_since(rev<MONAD_ETH_PRAGUE>{}, bytes32_t{});
 
     static constexpr BlockHeader header{
         .gas_limit = 10000,
@@ -458,7 +446,7 @@ TYPED_TEST(TraitsTest, invalid_nonce)
 
     auto const result =
         static_validate_header<typename TestFixture::Trait>(header);
-    if constexpr (TestFixture::Trait::evm_rev() >= EVMC_PARIS) {
+    if constexpr (TestFixture::Trait::evm_rev() >= MONAD_ETH_PARIS) {
         ASSERT_TRUE(result.has_error());
         EXPECT_EQ(result.error(), BlockError::InvalidNonce);
     }

@@ -15,7 +15,7 @@
 
 #pragma once
 
-#include <category/execution/ethereum/core/address.hpp>
+#include <category/core/address.hpp>
 #include <category/execution/ethereum/core/contract/big_endian.hpp>
 #include <category/execution/ethereum/core/contract/storage_variable.hpp>
 #include <category/execution/monad/staking/config.hpp>
@@ -27,11 +27,9 @@
 #include <optional>
 #include <span>
 
-#include <intx/intx.hpp>
-
 MONAD_STAKING_NAMESPACE_BEGIN
 
-using namespace intx::literals;
+using namespace monad::literals;
 
 // staking contract address
 inline constexpr Address STAKING_CA{0x1000};
@@ -106,7 +104,15 @@ namespace limits
     {
         return 1;
     }
-};
+}
+
+// staking contract function selectors
+namespace selector
+{
+    inline constexpr uint32_t REWARD = 0x791bdcf3;
+    inline constexpr uint32_t SNAPSHOT = 0x157eeb21;
+    inline constexpr uint32_t ON_EPOCH_CHANGE = 0x1d4e9f02;
+}
 
 // sanity check: commission rate doesn't exceed 100% (1e18)
 // note that: delegator_reward = (raw_reward * COMMISSION) / 1e18

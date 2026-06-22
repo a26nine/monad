@@ -15,6 +15,8 @@
 
 #include "fixture.hpp"
 
+#include <category/core/bytes.hpp>
+#include <category/core/int.hpp>
 #include <category/core/runtime/uint256.hpp>
 #include <category/vm/runtime/data.hpp>
 #include <category/vm/runtime/transmute.hpp>
@@ -29,8 +31,8 @@ using namespace monad::vm;
 using namespace monad::vm::runtime;
 using namespace monad::vm::compiler::test;
 
-constexpr auto addr = vm::runtime::uint256_t{678};
-constexpr auto wei = vm::runtime::uint256_t{782374};
+constexpr auto addr = uint256_t{678};
+constexpr auto wei = uint256_t{782374};
 
 template <typename Trait>
 constexpr auto gas_remaining_cold_access()
@@ -40,7 +42,7 @@ constexpr auto gas_remaining_cold_access()
             return 0;
         }
     }
-    if constexpr (Trait::evm_rev() <= EVMC_ISTANBUL) {
+    if constexpr (Trait::evm_rev() <= MONAD_ETH_ISTANBUL) {
         return 10'000;
     }
     else {
@@ -92,7 +94,7 @@ TEST_F(RuntimeTest, CallDataLoadOutOfBounds)
 {
     auto load = wrap(calldataload);
 
-    ASSERT_EQ(call(calldataload, std::numeric_limits<std::int64_t>::max()), 0);
+    ASSERT_EQ(call(calldataload, std::numeric_limits<int64_t>::max()), 0);
 
     ASSERT_EQ(load(256), 0);
 
@@ -370,7 +372,7 @@ TYPED_TEST(RuntimeTraitsTest, ExtCodeHash)
     auto hash = TestFixture::wrap(extcodehash<traits>);
 
     this->host_.accounts[address_from_uint256(addr)].codehash =
-        bytes32_from_uint256(713682);
+        store_be_as<bytes32_t>(uint256_t{713682});
 
     this->ctx_.gas_remaining = 10'000;
 

@@ -23,12 +23,33 @@
 #include <category/execution/ethereum/db/util.hpp>
 #include <category/execution/monad/core/monad_block.hpp>
 #include <category/mpt/db.hpp>
+#include <category/mpt/db_metadata_context.hpp>
+#include <category/mpt/detail/timeline.hpp>
 #include <category/mpt/ondisk_db_config.hpp>
+#include <category/mpt/state_machine_kind.hpp>
+#include <category/mpt/trie.hpp>
+
+#include <test_resource_data.h>
 
 #include <ankerl/unordered_dense.h>
 #include <gtest/gtest.h>
 
 #include <filesystem>
+
+namespace monad::mpt::test
+{
+    // Friend-of-Db accessor (db.hpp friends monad::mpt::test::DbAccessor).
+    // Lets tests stamp the persisted state_machine_kind on a freshly-
+    // truncated pool before the snapshot loader (which uses the
+    // metadata-driven Db ctor internally) reads from it.
+    struct DbAccessor
+    {
+        static UpdateAux &aux(Db &db)
+        {
+            return const_cast<UpdateAux &>(db.aux());
+        }
+    };
+}
 
 namespace
 {
@@ -93,8 +114,9 @@ TEST(DbBinarySnapshot, Basic)
     Code code_delta;
     BlockHeader last_header;
     {
-        OnDiskMachine machine;
-        mpt::Db db{machine, OnDiskDbConfig{.dbname_paths = {src_db.path}}};
+        mpt::Db db{
+            std::make_unique<OnDiskMachine>(),
+            OnDiskDbConfig{.dbname_paths = {src_db.path}}};
         Node::SharedPtr root{};
         for (uint64_t i = 0; i < 100; ++i) {
             root = load_header(std::move(root), db, BlockHeader{.number = i});
@@ -127,8 +149,12 @@ TEST(DbBinarySnapshot, Basic)
         }
         TrieDb tdb{db};
         ASSERT_EQ(tdb.get_block_number(), db.get_latest_version());
-        tdb.commit(
-            deltas, code_delta, bytes32_t{100}, BlockHeader{.number = 100});
+        monad::test::commit_simple(
+            tdb,
+            monad::test::sd(std::move(deltas)),
+            code_delta,
+            bytes32_t{100},
+            BlockHeader{.number = 100});
         tdb.finalize(100, bytes32_t{100});
         last_header = tdb.read_eth_header();
         root_hash = tdb.state_root();
@@ -153,9 +179,16 @@ TEST(DbBinarySnapshot, Basic)
         monad_db_snapshot_filesystem_write_user_context_destroy(context);
 
         {
-            OnDiskMachine machine;
             mpt::Db dest_init{
-                machine, OnDiskDbConfig{.dbname_paths = {dest_db.path}}};
+                std::make_unique<OnDiskMachine>(),
+                OnDiskDbConfig{.dbname_paths = {dest_db.path}}};
+            // Stamp the kind so the snapshot loader's metadata-driven
+            // Db ctor (via monad_db_snapshot_loader_create) can resolve
+            // it.
+            monad::mpt::test::DbAccessor::aux(dest_init)
+                .metadata_ctx()
+                .set_state_machine_kind(
+                    timeline_id::primary, state_machine_kind::ethereum);
         }
         char const *dbname_paths_new[] = {dest_db.path.c_str()};
         monad_db_snapshot_load_filesystem(
@@ -202,8 +235,9 @@ TEST(DbBinarySnapshot, MultipleShards)
     Code code_delta;
     BlockHeader last_header;
     {
-        OnDiskMachine machine;
-        mpt::Db db{machine, OnDiskDbConfig{.dbname_paths = {src_db.path}}};
+        mpt::Db db{
+            std::make_unique<OnDiskMachine>(),
+            OnDiskDbConfig{.dbname_paths = {src_db.path}}};
         Node::SharedPtr root{};
         for (uint64_t i = 0; i < 100; ++i) {
             root = load_header(std::move(root), db, BlockHeader{.number = i});
@@ -236,8 +270,12 @@ TEST(DbBinarySnapshot, MultipleShards)
         }
         TrieDb tdb{db};
         ASSERT_EQ(tdb.get_block_number(), db.get_latest_version());
-        tdb.commit(
-            deltas, code_delta, bytes32_t{100}, BlockHeader{.number = 100});
+        monad::test::commit_simple(
+            tdb,
+            monad::test::sd(std::move(deltas)),
+            code_delta,
+            bytes32_t{100},
+            BlockHeader{.number = 100});
         tdb.finalize(100, bytes32_t{100});
         last_header = tdb.read_eth_header();
         root_hash = tdb.state_root();
@@ -300,9 +338,16 @@ TEST(DbBinarySnapshot, MultipleShards)
 
         EXPECT_EQ(total_shards_copied, 256u);
         {
-            OnDiskMachine machine;
             mpt::Db dest_init{
-                machine, OnDiskDbConfig{.dbname_paths = {dest_db.path}}};
+                std::make_unique<OnDiskMachine>(),
+                OnDiskDbConfig{.dbname_paths = {dest_db.path}}};
+            // Stamp the kind so the snapshot loader's metadata-driven
+            // Db ctor (via monad_db_snapshot_loader_create) can resolve
+            // it.
+            monad::mpt::test::DbAccessor::aux(dest_init)
+                .metadata_ctx()
+                .set_state_machine_kind(
+                    timeline_id::primary, state_machine_kind::ethereum);
         }
         char const *dbname_paths_new[] = {dest_db.path.c_str()};
         monad_db_snapshot_load_filesystem(

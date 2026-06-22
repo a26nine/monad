@@ -72,13 +72,13 @@ namespace
             return random_byte();
         });
 
-        MONAD_VM_ASSERT(
+        MONAD_ASSERT(
             program.size() <= *monad::vm::interpreter::code_size_t::max());
         auto rt = asmjit::JitRuntime{};
 
         for (auto _ : state) {
             auto fn = monad::vm::compiler::native::compile<
-                monad::EvmTraits<EVMC_LATEST_STABLE_REVISION>>(
+                monad::EvmTraits<MONAD_ETH_LATEST_STABLE_REVISION>>(
                 rt,
                 program.data(),
                 monad::vm::interpreter::code_size_t::unsafe_from(
@@ -112,14 +112,14 @@ namespace
         file.read(buffer.data(), size);
 
         auto program = monad::vm::utils::parse_hex_program(buffer);
-        MONAD_VM_ASSERT(
+        MONAD_ASSERT(
             program.size() <= *monad::vm::interpreter::code_size_t::max());
 
         auto rt = asmjit::JitRuntime{};
 
         for (auto _ : state) {
             auto ncode = monad::vm::compiler::native::compile<
-                monad::EvmTraits<EVMC_LATEST_STABLE_REVISION>>(
+                monad::EvmTraits<MONAD_ETH_LATEST_STABLE_REVISION>>(
                 rt,
                 program.data(),
                 monad::vm::interpreter::code_size_t::unsafe_from(

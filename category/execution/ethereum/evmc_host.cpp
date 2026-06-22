@@ -13,12 +13,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include <category/core/address.hpp>
 #include <category/core/assert.h>
 #include <category/core/bytes.hpp>
 #include <category/core/config.hpp>
+#include <category/core/int.hpp>
+#include <category/core/likely.h>
 #include <category/execution/ethereum/block_hash_buffer.hpp>
 #include <category/execution/ethereum/block_hash_history.hpp>
-#include <category/execution/ethereum/core/address.hpp>
 #include <category/execution/ethereum/core/receipt.hpp>
 #include <category/execution/ethereum/evmc_host.hpp>
 #include <category/execution/ethereum/state3/state.hpp>
@@ -34,19 +36,20 @@
 MONAD_NAMESPACE_BEGIN
 
 EvmcHostBase::EvmcHostBase(
-    CallTracerBase &call_tracer, evmc_tx_context const &tx_context,
-    BlockHashBuffer const &block_hash_buffer, State &state,
-    bool const log_native_transfers) noexcept
+    CallTracerBase &call_tracer, trace::StateTracer &state_tracer,
+    evmc_tx_context const &tx_context, BlockHashBuffer const &block_hash_buffer,
+    State &state, bool const log_native_transfers) noexcept
     : block_hash_buffer_{block_hash_buffer}
     , tx_context_{tx_context}
     , state_{state}
     , call_tracer_{call_tracer}
     , log_native_transfers_{log_native_transfers}
+    , state_tracer_{state_tracer}
 {
 }
 
-bytes32_t EvmcHostBase::get_storage(
-    Address const &address, bytes32_t const &key) const noexcept
+evmc::bytes32 EvmcHostBase::get_storage(
+    evmc::address const &address, evmc::bytes32 const &key) const noexcept
 {
     try {
         return state_.get_storage(address, key);
@@ -58,8 +61,8 @@ bytes32_t EvmcHostBase::get_storage(
 }
 
 evmc_storage_status EvmcHostBase::set_storage(
-    Address const &address, bytes32_t const &key,
-    bytes32_t const &value) noexcept
+    evmc::address const &address, evmc::bytes32 const &key,
+    evmc::bytes32 const &value) noexcept
 {
     try {
         return state_.set_storage(address, key, value);
@@ -70,10 +73,11 @@ evmc_storage_status EvmcHostBase::set_storage(
     stack_unwind();
 }
 
-evmc::uint256be EvmcHostBase::get_balance(Address const &address) const noexcept
+evmc::uint256be
+EvmcHostBase::get_balance(evmc::address const &address) const noexcept
 {
     try {
-        return intx::be::store<evmc::uint256be>(state_.get_balance(address));
+        return store_be_as<evmc::uint256be>(state_.get_balance(address));
     }
     catch (...) {
         capture_current_exception();
@@ -81,9 +85,20 @@ evmc::uint256be EvmcHostBase::get_balance(Address const &address) const noexcept
     stack_unwind();
 }
 
-size_t EvmcHostBase::get_code_size(Address const &address) const noexcept
+size_t EvmcHostBase::get_code_size(evmc::address const &address) const noexcept
 {
     try {
+        if (MONAD_UNLIKELY(
+                std::holds_alternative<trace::CodeTracer>(state_tracer_))) {
+            bytes32_t const hash = state_.get_code_hash(address);
+            if (hash == NULL_HASH) {
+                return 0;
+            }
+            auto const vcode = state_.read_code(hash);
+            MONAD_ASSERT(vcode);
+            trace::on_read_code(state_tracer_, hash, vcode->intercode());
+            return vcode->intercode()->size();
+        }
         return state_.get_code_size(address);
     }
     catch (...) {
@@ -92,7 +107,8 @@ size_t EvmcHostBase::get_code_size(Address const &address) const noexcept
     stack_unwind();
 }
 
-bytes32_t EvmcHostBase::get_code_hash(Address const &address) const noexcept
+evmc::bytes32
+EvmcHostBase::get_code_hash(evmc::address const &address) const noexcept
 {
     try {
         if (state_.account_is_dead(address)) {
@@ -107,10 +123,21 @@ bytes32_t EvmcHostBase::get_code_hash(Address const &address) const noexcept
 }
 
 size_t EvmcHostBase::copy_code(
-    Address const &address, size_t offset, uint8_t *data,
-    size_t size) const noexcept
+    evmc::address const &address, size_t const offset, uint8_t *const data,
+    size_t const size) const noexcept
 {
     try {
+        if (MONAD_UNLIKELY(
+                std::holds_alternative<trace::CodeTracer>(state_tracer_))) {
+            bytes32_t const hash = state_.get_code_hash(address);
+            if (hash != NULL_HASH) {
+                auto const vcode = state_.read_code(hash);
+                MONAD_ASSERT(vcode);
+                trace::on_read_code(state_tracer_, hash, vcode->intercode());
+                return vcode->intercode()->copy_code(offset, data, size);
+            }
+            return 0;
+        }
         return state_.copy_code(address, offset, data, size);
     }
     catch (...) {
@@ -127,7 +154,7 @@ evmc_tx_context const *EvmcHostBase::get_tx_context() const noexcept
 // This attempts to read from the contract first before falling back to the
 // block hash buffer. This is currently only called by the BLOCKHASH
 // implementation which guarantees that the block_number is in range.
-bytes32_t
+evmc::bytes32
 EvmcHostBase::get_block_hash(int64_t const block_number) const noexcept
 {
     try {
@@ -149,8 +176,9 @@ EvmcHostBase::get_block_hash(int64_t const block_number) const noexcept
 }
 
 void EvmcHostBase::emit_log(
-    Address const &address, uint8_t const *data, size_t data_size,
-    bytes32_t const topics[], size_t num_topics) noexcept
+    evmc::address const &address, uint8_t const *const data,
+    size_t const data_size, evmc::bytes32 const topics[],
+    size_t const num_topics) noexcept
 {
     try {
         Receipt::Log log{.data = {data, data_size}, .address = address};
@@ -167,20 +195,8 @@ void EvmcHostBase::emit_log(
     stack_unwind();
 }
 
-evmc_access_status EvmcHostBase::access_storage(
-    Address const &address, bytes32_t const &key) noexcept
-{
-    try {
-        return state_.access_storage(address, key);
-    }
-    catch (...) {
-        capture_current_exception();
-    }
-    stack_unwind();
-}
-
-bytes32_t EvmcHostBase::get_transient_storage(
-    Address const &address, bytes32_t const &key) const noexcept
+evmc::bytes32 EvmcHostBase::get_transient_storage(
+    evmc::address const &address, evmc::bytes32 const &key) const noexcept
 {
     try {
         return state_.get_transient_storage(address, key);
@@ -192,11 +208,24 @@ bytes32_t EvmcHostBase::get_transient_storage(
 }
 
 void EvmcHostBase::set_transient_storage(
-    Address const &address, bytes32_t const &key,
-    bytes32_t const &value) noexcept
+    evmc::address const &address, evmc::bytes32 const &key,
+    evmc::bytes32 const &value) noexcept
 {
     try {
         return state_.set_transient_storage(address, key, value);
+    }
+    catch (...) {
+        capture_current_exception();
+    }
+    stack_unwind();
+}
+
+EvmcHostBase::PageStorageStatus EvmcHostBase::update_page(
+    evmc::address const &address, evmc::bytes32 const &page_key,
+    evmc_storage_status const status) noexcept
+{
+    try {
+        return state_.update_page(address, page_key, status);
     }
     catch (...) {
         capture_current_exception();

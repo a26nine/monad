@@ -15,10 +15,12 @@
 
 #pragma once
 
+#include <category/core/address.hpp>
+#include <category/core/assert.h>
+#include <category/core/cases.hpp>
 #include <category/core/hex.hpp>
+#include <category/core/int.hpp>
 #include <category/core/runtime/uint256.hpp>
-#include <category/vm/core/assert.h>
-#include <category/vm/core/cases.hpp>
 #include <category/vm/evm/opcodes.hpp>
 #include <category/vm/evm/traits.hpp>
 #include <category/vm/utils/evm-as/builder.hpp>
@@ -178,7 +180,7 @@ namespace monad::vm::utils::evm_as
     {
         auto const label_offsets = resolve_labels<traits>(eb);
         for (auto const &ins : eb) {
-            std::array<uint8_t, sizeof(runtime::uint256_t)> imm_bytes{};
+            std::array<uint8_t, sizeof(uint256_t)> imm_bytes{};
             if (Instruction::is_comment(ins)) {
                 continue;
             }
@@ -191,7 +193,7 @@ namespace monad::vm::utils::evm_as
                         emit_byte(push.opcode);
                         // SAFETY: The buffer `imm_bytes` is
                         // large enough to hold an uint256_t.
-                        push.imm.store_be(imm_bytes.data());
+                        store_be(imm_bytes.data(), push.imm);
                         auto const n = push.n();
                         for (size_t i = 0; i < n; i++) {
                             emit_byte(imm_bytes[32 - n + i]);
@@ -208,6 +210,15 @@ namespace monad::vm::utils::evm_as
                         size_t const offset = it->second;
                         size_t const n =
                             offset == 0 ? offset : byte_width(offset);
+                        if constexpr (traits::evm_rev() < MONAD_ETH_SHANGHAI) {
+                            if (n == 0) {
+                                // Special case for zero offset before Shanghai,
+                                // as PUSH0 is not available.
+                                emit_byte(mc::EvmOpCode::PUSH1);
+                                emit_byte(0x00);
+                                return;
+                            }
+                        }
                         emit_byte(
                             mc::EvmOpCode::PUSH0 + static_cast<uint8_t>(n));
                         // Note: assumes we are executing on a
@@ -217,16 +228,17 @@ namespace monad::vm::utils::evm_as
                         }
                     },
                     [&](PushAddressI const &push) -> void {
-                        static constexpr size_t addr_size =
-                            sizeof(evmc::address);
+                        static constexpr size_t addr_size = sizeof(Address);
                         // Emit the smallest possible PUSH opcode
                         size_t const least_n = addr_size - countl(push.address);
-                        if (least_n == 0 && traits::evm_rev() < EVMC_SHANGHAI) {
-                            // Special case for zero address before Shanghai, as
-                            // PUSH0 is not available.
-                            emit_byte(mc::EvmOpCode::PUSH1);
-                            emit_byte(0x00);
-                            return;
+                        if constexpr (traits::evm_rev() < MONAD_ETH_SHANGHAI) {
+                            if (least_n == 0) {
+                                // Special case for zero address before
+                                // Shanghai, as PUSH0 is not available.
+                                emit_byte(mc::EvmOpCode::PUSH1);
+                                emit_byte(0x00);
+                                return;
+                            }
                         }
                         emit_byte(
                             mc::EvmOpCode::PUSH0 +
@@ -242,7 +254,7 @@ namespace monad::vm::utils::evm_as
                         emit_byte(mc::EvmOpCode::JUMPDEST);
                     },
                     [&](InvalidI const &) -> void { emit_byte(0xFE); },
-                    [&](auto const &) -> void { MONAD_VM_ASSERT(false); }}
+                    [&](auto const &) -> void { MONAD_ABORT(); }}
 
                 ,
                 ins);
@@ -291,7 +303,7 @@ namespace monad::vm::utils::evm_as
         }
 
         constexpr mnemonic_config(
-            bool resolve_labels, bool annotate, size_t offset)
+            bool const resolve_labels, bool const annotate, size_t const offset)
             : resolve_labels(resolve_labels)
             , annotate(annotate)
             , desired_annotation_offset(offset)
@@ -350,7 +362,10 @@ namespace monad::vm::utils::evm_as
                             }
                             size_t offset = it->second;
                             if (offset == 0) {
-                                std::string const str = std::format("PUSH0");
+                                static constexpr std::string_view str =
+                                    traits::evm_rev() < MONAD_ETH_SHANGHAI
+                                        ? "PUSH1 0x00"
+                                        : "PUSH0";
                                 os << str;
                                 return str.size();
                             }
@@ -366,11 +381,11 @@ namespace monad::vm::utils::evm_as
                         }
                     },
                     [&](PushAddressI const &push) -> size_t {
-                        static constexpr size_t addr_size =
-                            sizeof(evmc::address);
+                        static constexpr size_t addr_size = sizeof(Address);
                         size_t const least_n = addr_size - countl(push.address);
                         if (least_n == 0) {
-                            if constexpr (traits::evm_rev() < EVMC_SHANGHAI) {
+                            if constexpr (
+                                traits::evm_rev() < MONAD_ETH_SHANGHAI) {
                                 os << std::format("PUSH1 0x0");
                                 return 9;
                             }

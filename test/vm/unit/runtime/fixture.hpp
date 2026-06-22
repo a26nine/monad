@@ -15,16 +15,17 @@
 
 #pragma once
 
+#include <category/core/address.hpp>
 #include <category/core/runtime/uint256.hpp>
 #include <category/vm/runtime/detail.hpp>
 #include <category/vm/runtime/types.hpp>
 #include <monad/test/traits_test.hpp>
+#include <test/vm/unit/runtime/mocked_host.hpp>
 #include <test/vm/utils/test_context.hpp>
 
 #include <gtest/gtest.h>
 
 #include <evmc/evmc.hpp>
-#include <evmc/mocked_host.hpp>
 
 #include <limits>
 
@@ -33,7 +34,7 @@ extern "C" void tests_trampoline(void *, void (*)(void *), void *);
 namespace monad::vm::compiler::test
 {
     using namespace runtime;
-    using namespace evmc::literals;
+    using namespace monad::literals;
 
     class RuntimeTestBase
     {
@@ -45,7 +46,7 @@ namespace monad::vm::compiler::test
         std::array<std::uint8_t, 128> call_return_data_;
 
         std::array<evmc_bytes32, 2> blob_hashes_;
-        evmc::MockedHost host_;
+        monad::vm::test::MockedHost host_;
         monad::vm::test::TestContext test_ctx_;
         vm::runtime::Context &ctx_;
 
@@ -53,7 +54,7 @@ namespace monad::vm::compiler::test
         success_result(std::int64_t gas_left, std::int64_t gas_refund = 0);
 
         evmc_result create_result(
-            evmc_address prog_addr, std::int64_t gas_left,
+            Address prog_addr, std::int64_t gas_left,
             std::int64_t gas_refund = 0);
 
         evmc_result failure_result(evmc_status_code = EVMC_INTERNAL_ERROR);
@@ -172,7 +173,7 @@ namespace monad::vm::compiler::test
 
         std::basic_string_view<uint8_t> result_data();
 
-        void add_account_at(uint256_t addr, std::span<uint8_t> const code);
+        void add_account_at(uint256_t addr, std::span<uint8_t> code);
     };
 
     class RuntimeTest
@@ -194,13 +195,13 @@ namespace monad::vm::compiler::test
                        : runtime::Memory::Version::V1;
         }
 
-        void assert_delegated(evmc::address const &delegate_addr)
+        void assert_delegated(Address const &delegate_addr)
         {
             ASSERT_EQ(ctx_.result.status, StatusCode::Success);
 
             ASSERT_EQ(host_.recorded_calls.size(), 1);
 
-            if constexpr (TraitsTest<T>::Trait::evm_rev() >= EVMC_PRAGUE) {
+            if constexpr (TraitsTest<T>::Trait::evm_rev() >= MONAD_ETH_PRAGUE) {
                 ASSERT_EQ(
                     host_.access_account(delegate_addr), EVMC_ACCESS_WARM);
                 ASSERT_EQ(

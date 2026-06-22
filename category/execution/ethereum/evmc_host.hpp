@@ -18,22 +18,20 @@
 #include <category/core/bytes.hpp>
 #include <category/core/config.hpp>
 #include <category/execution/ethereum/chain/chain.hpp>
-#include <category/execution/ethereum/core/address.hpp>
 #include <category/execution/ethereum/core/contract/abi_encode.hpp>
 #include <category/execution/ethereum/core/contract/abi_signatures.hpp>
 #include <category/execution/ethereum/core/contract/events.hpp>
-#include <category/execution/ethereum/evm.hpp>
+#include <category/execution/ethereum/execute_message.hpp>
 #include <category/execution/ethereum/precompiles.hpp>
 #include <category/execution/ethereum/reserve_balance.hpp>
 #include <category/execution/ethereum/state3/state.hpp>
 #include <category/execution/ethereum/trace/call_tracer.hpp>
+#include <category/execution/ethereum/trace/state_tracer.hpp>
 #include <category/execution/ethereum/transaction_gas.hpp>
 #include <category/vm/evm/delegation.hpp>
 #include <category/vm/evm/traits.hpp>
 #include <category/vm/host.hpp>
 #include <category/vm/runtime/types.hpp>
-
-#include <intx/intx.hpp>
 
 #include <evmc/evmc.h>
 #include <evmc/evmc.hpp>
@@ -59,50 +57,56 @@ protected:
     bool const log_native_transfers_;
 
 public:
+    trace::StateTracer &state_tracer_;
+
     EvmcHostBase(
-        CallTracerBase &, evmc_tx_context const &, BlockHashBuffer const &,
-        State &, bool const log_native_transfers) noexcept;
+        CallTracerBase &, trace::StateTracer &, evmc_tx_context const &,
+        BlockHashBuffer const &, State &, bool log_native_transfers) noexcept;
 
     virtual ~EvmcHostBase() noexcept = default;
 
-    virtual bytes32_t
-    get_storage(Address const &, bytes32_t const &key) const noexcept override;
+    virtual evmc::bytes32 get_storage(
+        evmc::address const &,
+        evmc::bytes32 const &key) const noexcept override;
 
     virtual evmc_storage_status set_storage(
-        Address const &, bytes32_t const &key,
-        bytes32_t const &value) noexcept override;
+        evmc::address const &, evmc::bytes32 const &key,
+        evmc::bytes32 const &value) noexcept override;
 
     virtual evmc::uint256be
-    get_balance(Address const &) const noexcept override;
+    get_balance(evmc::address const &) const noexcept override;
 
-    virtual size_t get_code_size(Address const &) const noexcept override;
+    virtual size_t get_code_size(evmc::address const &) const noexcept override;
 
-    virtual bytes32_t get_code_hash(Address const &) const noexcept override;
+    virtual evmc::bytes32
+    get_code_hash(evmc::address const &) const noexcept override;
 
     virtual size_t copy_code(
-        Address const &, size_t offset, uint8_t *data,
+        evmc::address const &, size_t offset, uint8_t *data,
         size_t size) const noexcept override;
 
     virtual evmc_tx_context const *get_tx_context() const noexcept override;
 
-    virtual bytes32_t get_block_hash(int64_t) const noexcept override;
+    virtual evmc::bytes32 get_block_hash(int64_t) const noexcept override;
 
     virtual void emit_log(
-        Address const &, uint8_t const *data, size_t data_size,
-        bytes32_t const topics[], size_t num_topics) noexcept override;
+        evmc::address const &, uint8_t const *data, size_t data_size,
+        evmc::bytes32 const topics[], size_t num_topics) noexcept override;
 
-    virtual evmc_access_status
-    access_storage(Address const &, bytes32_t const &key) noexcept override;
-
-    virtual bytes32_t get_transient_storage(
-        Address const &, bytes32_t const &key) const noexcept override;
+    virtual evmc::bytes32 get_transient_storage(
+        evmc::address const &,
+        evmc::bytes32 const &key) const noexcept override;
 
     virtual void set_transient_storage(
-        Address const &, bytes32_t const &key,
-        bytes32_t const &value) noexcept override;
+        evmc::address const &, evmc::bytes32 const &key,
+        evmc::bytes32 const &value) noexcept override;
+
+    virtual PageStorageStatus update_page(
+        evmc::address const &, evmc::bytes32 const &page_key,
+        evmc_storage_status) noexcept override;
 };
 
-static_assert(sizeof(EvmcHostBase) == 64);
+static_assert(sizeof(EvmcHostBase) == 72);
 static_assert(alignof(EvmcHostBase) == 8);
 
 template <Traits traits>
@@ -114,12 +118,13 @@ struct EvmcHost final : public EvmcHostBase
     ChainContext<traits> const &chain_ctx_;
 
     EvmcHost(
-        CallTracerBase &call_tracer, evmc_tx_context const &tx_context,
+        CallTracerBase &call_tracer, trace::StateTracer &state_tracer,
+        evmc_tx_context const &tx_context,
         BlockHashBuffer const &block_hash_buffer, State &state,
-        Transaction const &tx, std::optional<uint256_t> base_fee_per_gas,
-        uint64_t i, ChainContext<traits> const &chain_ctx,
+        Transaction const &tx, std::optional<uint256_t> const base_fee_per_gas,
+        uint64_t const i, ChainContext<traits> const &chain_ctx,
         bool const log_native_transfers = false) noexcept
-        : EvmcHostBase{call_tracer, tx_context, block_hash_buffer, state, log_native_transfers}
+        : EvmcHostBase{call_tracer, state_tracer, tx_context, block_hash_buffer, state, log_native_transfers}
         , tx_{tx}
         , base_fee_per_gas_{base_fee_per_gas}
         , i_{i}
@@ -127,12 +132,12 @@ struct EvmcHost final : public EvmcHostBase
     {
     }
 
-    virtual bool account_exists(Address const &address) const noexcept override
+    virtual bool
+    account_exists(evmc::address const &address) const noexcept override
     {
+        static_assert(traits::evm_rev() >= MONAD_ETH_SPURIOUS_DRAGON);
+
         try {
-            if constexpr (traits::evm_rev() < EVMC_SPURIOUS_DRAGON) {
-                return state_.account_exists(address);
-            }
             return !state_.account_is_dead(address);
         }
         catch (...) {
@@ -142,7 +147,8 @@ struct EvmcHost final : public EvmcHostBase
     }
 
     virtual bool selfdestruct(
-        Address const &address, Address const &beneficiary) noexcept override
+        evmc::address const &address,
+        evmc::address const &beneficiary) noexcept override
     {
         try {
             auto const [result, transferred_balance] =
@@ -190,13 +196,26 @@ struct EvmcHost final : public EvmcHostBase
     }
 
     virtual evmc_access_status
-    access_account(Address const &address) noexcept override
+    access_account(evmc::address const &address) noexcept override
     {
         try {
             if (is_precompile<traits>(address)) {
                 return EVMC_ACCESS_WARM;
             }
             return state_.access_account(address);
+        }
+        catch (...) {
+            capture_current_exception();
+        }
+        stack_unwind();
+    }
+
+    virtual evmc_access_status access_storage(
+        evmc::address const &address,
+        evmc::bytes32 const &key) noexcept override
+    {
+        try {
+            return state_.access_storage<traits>(address, key);
         }
         catch (...) {
             capture_current_exception();
@@ -221,7 +240,8 @@ struct EvmcHost final : public EvmcHostBase
                 abi_encode_event_signature("Transfer(address,address,uint256)");
             static_assert(
                 signature ==
-                0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef_bytes32);
+                bytes32_from_hex("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a"
+                                 "11628f55a4df523b3ef"));
 
             auto event = EventBuilder(native_token_address, signature)
                              .add_topic(abi_encode_address(from))
@@ -235,9 +255,11 @@ struct EvmcHost final : public EvmcHostBase
     }
 };
 
-static_assert(sizeof(EvmcHost<EvmTraits<EVMC_LATEST_STABLE_REVISION>>) == 128);
-static_assert(alignof(EvmcHost<EvmTraits<EVMC_LATEST_STABLE_REVISION>>) == 8);
-static_assert(sizeof(EvmcHost<MonadTraits<MONAD_NEXT>>) == 128);
+static_assert(
+    sizeof(EvmcHost<EvmTraits<MONAD_ETH_LATEST_STABLE_REVISION>>) == 136);
+static_assert(
+    alignof(EvmcHost<EvmTraits<MONAD_ETH_LATEST_STABLE_REVISION>>) == 8);
+static_assert(sizeof(EvmcHost<MonadTraits<MONAD_NEXT>>) == 136);
 static_assert(alignof(EvmcHost<MonadTraits<MONAD_NEXT>>) == 8);
 
 MONAD_NAMESPACE_END

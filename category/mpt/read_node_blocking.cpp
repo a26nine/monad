@@ -16,25 +16,26 @@
 #include <category/async/detail/scope_polyfill.hpp>
 #include <category/core/assert.h>
 #include <category/mpt/config.hpp>
+#include <category/mpt/detail/timeline.hpp>
 #include <category/mpt/node.hpp>
 #include <category/mpt/trie.hpp>
 #include <category/mpt/util.hpp>
+
+#include <cstdint>
 
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#include <cstdint>
-
 MONAD_MPT_NAMESPACE_BEGIN
 
 Node::SharedPtr read_node_blocking(
-    UpdateAuxImpl const &aux, chunk_offset_t const node_offset,
-    uint64_t const version)
+    UpdateAux const &aux, chunk_offset_t const node_offset,
+    uint64_t const version, timeline_id const tid)
 {
     MONAD_ASSERT(aux.is_on_disk());
-    if (!aux.version_is_valid_ondisk(version)) {
+    if (!aux.metadata_ctx().version_is_valid_ondisk(version, tid)) {
         return {};
     }
     auto &pool = aux.io->storage_pool();
@@ -50,10 +51,11 @@ Node::SharedPtr read_node_blocking(
     uint16_t const buffer_off = uint16_t(node_offset.offset - rd_offset);
     auto *buffer =
         (unsigned char *)aligned_alloc(DISK_PAGE_SIZE, bytes_to_read);
-    auto unbuffer = make_scope_exit([buffer]() noexcept { ::free(buffer); });
+    auto const unbuffer =
+        make_scope_exit([buffer]() noexcept { ::free(buffer); });
 
-    auto &chunk = pool.chunk(pool.seq, node_offset.id);
-    auto fd = chunk.read_fd();
+    auto const &chunk = pool.chunk(pool.seq, node_offset.id);
+    auto const fd = chunk.read_fd();
     ssize_t const bytes_read = pread(
         fd.first,
         buffer,
@@ -66,7 +68,7 @@ Node::SharedPtr read_node_blocking(
             rd_offset,
             strerror(errno));
     }
-    return aux.version_is_valid_ondisk(version)
+    return aux.metadata_ctx().version_is_valid_ondisk(version, tid)
                ? deserialize_node_from_buffer(
                      buffer + buffer_off, size_t(bytes_read) - buffer_off)
                : Node::SharedPtr{};

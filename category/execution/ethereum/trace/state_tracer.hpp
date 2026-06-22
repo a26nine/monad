@@ -15,16 +15,17 @@
 
 #pragma once
 
+#include <category/core/address.hpp>
 #include <category/core/config.hpp>
-#include <category/execution/ethereum/core/address.hpp>
 #include <category/execution/ethereum/state2/state_deltas.hpp>
 #include <category/execution/ethereum/state3/account_state.hpp>
 #include <category/vm/evm/traits.hpp>
 
 #include <ankerl/unordered_dense.h>
 #include <immer/map.hpp>
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
+#include <memory>
 #include <span>
 #include <variant>
 
@@ -93,22 +94,70 @@ namespace trace
         AccessListTracer(
             nlohmann::json &storage, Address const &sender,
             Address const &beneficiary, std::optional<Address> const &to,
-            std::span<std::optional<Address> const> const authorities);
+            std::span<std::optional<Address> const> authorities);
 
         template <Traits traits>
         void encode(State &);
 
+        void reset();
+
+        // Capture rollback-sensitive accesses from the frame that is about to
+        // be rejected. Must be called while that State frame is still pushed.
+        void capture_rejected_frame_accesses(State const &);
+
     private:
+        // Merge one account's access metadata into tracer-owned storage.
+        void
+        capture_accesses(Address const &, AccountState const &account_state);
+
+        // Capture accepted-frame accesses that are still visible in State at
+        // final encoding time.
+        void capture_accesses(State const &);
+
         nlohmann::json &storage_;
         Set<Address> excluded_addresses_{};
+        Map<Address, Set<bytes32_t>> accesses_{};
 
         template <Traits traits>
         bool should_exclude_address(Address const &) const;
     };
 
-    using StateTracer = std::variant<
-        std::monostate, PrestateTracer, StateDiffTracer, AccessListTracer>;
+    /// Records every code preimage read during execution, keyed by
+    /// code_hash. Used by witness generation to assemble the codes section
+    /// of the post-block witness. Insertions happen from the EVM host's
+    /// code-read entry points; production execution uses `std::monostate`
+    /// instead, so the recording path has zero cost. A CodeTracer is only
+    /// ever accessed from a single thread, so a plain (non-concurrent) map
+    /// suffices.
+    struct CodeTracer
+    {
+        Map<bytes32_t, vm::SharedIntercode> codes{};
+    };
 
+    using StateTracer = std::variant<
+        std::monostate, PrestateTracer, StateDiffTracer, AccessListTracer,
+        CodeTracer>;
+
+    inline void on_read_code(
+        StateTracer &tracer, bytes32_t const &code_hash,
+        vm::SharedIntercode const &intercode)
+    {
+        if (auto *t = std::get_if<CodeTracer>(&tracer);
+            t && code_hash != NULL_HASH) {
+            t->codes.emplace(code_hash, intercode);
+        }
+    }
+
+    // State-tracer lifecycle hook for a failed frame. Call immediately before
+    // State::pop_reject(), while rejected-frame access metadata is still
+    // visible through State.
+    void on_frame_reject(StateTracer &, State &);
+
+    // Clear execution-attempt-local tracer state before speculative execution.
+    void reset(StateTracer &);
+
+    // Finalise and serialise tracer output after transaction execution, once
+    // accepted-frame state has been merged into the visible State view.
     template <Traits traits>
     void run_tracer(StateTracer &tracer, State &state);
 

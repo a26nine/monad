@@ -15,10 +15,10 @@
 
 #pragma once
 
+#include <category/core/address.hpp>
 #include <category/core/config.hpp>
 #include <category/core/fiber/priority_pool.hpp>
 #include <category/core/result.hpp>
-#include <category/execution/ethereum/core/address.hpp>
 #include <category/execution/ethereum/core/receipt.hpp>
 #include <category/execution/ethereum/dispatch_transaction.hpp>
 #include <category/execution/ethereum/metrics/block_metrics.hpp>
@@ -47,9 +47,6 @@ namespace fiber
 } // namespace fiber
 
 template <Traits traits>
-void execute_block_header(Chain const &, BlockState &, BlockHeader const &);
-
-template <Traits traits>
 Result<std::vector<Receipt>> execute_block_transactions(
     Chain const &, BlockHeader const &, std::span<Transaction const>,
     std::span<Address const> senders,
@@ -57,7 +54,7 @@ Result<std::vector<Receipt>> execute_block_transactions(
     BlockState &, BlockHashBuffer const &, fiber::FiberGroup &, BlockMetrics &,
     std::span<std::unique_ptr<CallTracerBase>>,
     std::span<std::unique_ptr<trace::StateTracer>> state_tracers,
-    ChainContext<traits> const &chain_ctx);
+    ChainContext<traits> const &chain_ctx, bool trace_transfers = false);
 
 template <Traits traits>
 Result<std::vector<Receipt>> execute_block(
@@ -66,7 +63,8 @@ Result<std::vector<Receipt>> execute_block(
     BlockState &, BlockHashBuffer const &, fiber::FiberGroup &, BlockMetrics &,
     std::span<std::unique_ptr<CallTracerBase>>,
     std::span<std::unique_ptr<trace::StateTracer>> state_tracers,
-    ChainContext<traits> const &chain_ctx);
+    trace::StateTracer &system_call_state_tracer,
+    ChainContext<traits> const &chain_ctx, bool trace_transfers = false);
 
 std::vector<std::optional<Address>>
 recover_senders(std::span<Transaction const>, fiber::PriorityPool &);

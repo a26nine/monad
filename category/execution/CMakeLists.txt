@@ -37,9 +37,11 @@ add_library(
   "ethereum/chain/ethereum_mainnet_alloc.hpp"
   "ethereum/chain/genesis_state.cpp"
   "ethereum/chain/genesis_state.hpp"
+  "ethereum/chain/hive_net.cpp"
+  "ethereum/chain/hive_net.hpp"
+  "ethereum/chain/hive_net_alloc.hpp"
   # ethereum/core
   "ethereum/core/account.hpp"
-  "ethereum/core/address.hpp"
   "ethereum/core/base_ctypes.h"
   "ethereum/core/block.hpp"
   "ethereum/core/eth_ctypes.h"
@@ -54,6 +56,8 @@ add_library(
   "ethereum/core/contract/events.hpp"
   "ethereum/core/contract/storage_array.hpp"
   "ethereum/core/contract/storage_variable.hpp"
+  "ethereum/core/ecrecover.cpp"
+  "ethereum/core/ecrecover.hpp"
   "ethereum/core/fmt/account_fmt.hpp"
   "ethereum/core/fmt/address_fmt.hpp"
   "ethereum/core/fmt/block_fmt.hpp"
@@ -85,7 +89,6 @@ add_library(
   "ethereum/core/signature.hpp"
   "ethereum/core/transaction.cpp"
   "ethereum/core/transaction.hpp"
-  "ethereum/core/variant.hpp"
   "ethereum/core/withdrawal.hpp"
   # ethereum/db
   "ethereum/db/block_db.cpp"
@@ -100,6 +103,10 @@ add_library(
   "ethereum/db/db_snapshot_filesystem.h"
   "ethereum/db/file_db.cpp"
   "ethereum/db/file_db.hpp"
+  "ethereum/db/partial_trie_db.hpp"
+  "ethereum/db/partial_trie_db.cpp"
+  "ethereum/db/state_machine_init.cpp"
+  "ethereum/db/state_machine_init.hpp"
   "ethereum/db/trie_db.cpp"
   "ethereum/db/trie_db.hpp"
   "ethereum/db/trie_rodb.hpp"
@@ -113,6 +120,8 @@ add_library(
   "ethereum/event/exec_iter_help.h"
   "ethereum/event/record_block_events.cpp"
   "ethereum/event/record_block_events.hpp"
+  "ethereum/event/record_consensus_events.cpp"
+  "ethereum/event/record_consensus_events.hpp"
   "ethereum/event/record_txn_events.cpp"
   "ethereum/event/record_txn_events.hpp"
   # ethereum/execution
@@ -124,23 +133,27 @@ add_library(
   "ethereum/block_reward.hpp"
   "ethereum/create_contract_address.cpp"
   "ethereum/create_contract_address.hpp"
-  "ethereum/dao.hpp"
   "ethereum/dispatch_transaction.cpp"
   "ethereum/dispatch_transaction.hpp"
-  "ethereum/evm.cpp"
-  "ethereum/evm.hpp"
   "ethereum/evmc_host.cpp"
   "ethereum/evmc_host.hpp"
   "ethereum/execute_block.cpp"
   "ethereum/execute_block.hpp"
+  "ethereum/execute_block_header.cpp"
+  "ethereum/execute_block_header.hpp"
+  "ethereum/execute_message.cpp"
+  "ethereum/execute_message.hpp"
   "ethereum/execute_transaction.cpp"
   "ethereum/execute_transaction.hpp"
   "ethereum/fmt/event_trace_fmt.hpp"
+  "ethereum/process_requests.cpp"
+  "ethereum/process_requests.hpp"
   "ethereum/precompiles.cpp"
   "ethereum/precompiles.hpp"
   "ethereum/precompiles_bls12.cpp"
   "ethereum/precompiles_bls12.hpp"
   "ethereum/precompiles_impl.cpp"
+  "ethereum/precompiles_gas_cost_impl.cpp"
   "ethereum/reserve_balance.cpp"
   "ethereum/reserve_balance.hpp"
   "ethereum/trace/call_frame.cpp"
@@ -169,9 +182,9 @@ add_library(
   # ethereum/rlp
   "ethereum/rlp/config.hpp"
   "ethereum/rlp/decode.hpp"
-  "ethereum/rlp/decode_error.cpp"
-  "ethereum/rlp/decode_error.hpp"
   "ethereum/rlp/encode2.hpp"
+  "ethereum/rlp/execution_witness.cpp"
+  "ethereum/rlp/execution_witness.hpp"
   # ethereum/state2
   "ethereum/state2/block_state.cpp"
   "ethereum/state2/block_state.hpp"
@@ -181,6 +194,7 @@ add_library(
   "ethereum/state3/account_state.cpp"
   "ethereum/state3/account_state.hpp"
   "ethereum/state3/account_substate.hpp"
+  "ethereum/state3/page_tracker.hpp"
   "ethereum/state3/state.cpp"
   "ethereum/state3/state.hpp"
   "ethereum/state3/version_stack.hpp"
@@ -192,6 +206,9 @@ add_library(
 
 add_library(
   monad_execution_native OBJECT
+  # monad/db
+  "monad/db/storage_page.cpp"
+  "monad/db/storage_page.hpp"
   # monad/chain
   "monad/chain/monad_chain.cpp"
   "monad/chain/monad_chain.hpp"
@@ -221,7 +238,7 @@ add_library(
   "monad/min_base_fee.h"
   "monad/monad_precompiles.cpp"
   "monad/monad_precompiles.hpp"
-  "monad/monad_precompiles_impl.cpp"
+  "monad/monad_precompiles_gas_cost_impl.cpp"
   "monad/monad_transaction_gas.cpp"
   "monad/monad_transaction_gas.hpp"
   "monad/reserve_balance.cpp"
@@ -257,6 +274,7 @@ add_library(
   "monad/staking/util/bls.hpp"
   "monad/staking/util/consensus_view.cpp"
   "monad/staking/util/consensus_view.hpp"
+  "monad/staking/util/constants.cpp"
   "monad/staking/util/constants.hpp"
   "monad/staking/util/delegator.cpp"
   "monad/staking/util/delegator.hpp"
@@ -285,11 +303,11 @@ target_include_directories(
 
 target_compile_definitions(
   monad_execution_ethereum PUBLIC MONAD_CXX_CTYPES_USE_EVMC_HPP
-                                  MONAD_CXX_CTYPES_USE_INTX)
+                                  MONAD_CXX_CTYPES_USE_MONAD_INTS)
 
 target_compile_definitions(
   monad_execution_native PUBLIC MONAD_CXX_CTYPES_USE_EVMC_HPP
-                                MONAD_CXX_CTYPES_USE_INTX)
+                                MONAD_CXX_CTYPES_USE_MONAD_INTS)
 
 target_link_libraries(
   monad_execution_ethereum
@@ -300,6 +318,7 @@ target_link_libraries(
   PRIVATE Boost::fiber
   PRIVATE Boost::json
   PUBLIC c-kzg-4844
+  PRIVATE monad_crypto
   PRIVATE PkgConfig::brotli
   PRIVATE PkgConfig::crypto++
   PUBLIC ethash::keccak
@@ -321,7 +340,6 @@ target_link_libraries(
   PUBLIC monad_core
   PUBLIC monad_trie
   PUBLIC evmc
-  PUBLIC intx::intx
   PUBLIC magic_enum::magic_enum
   PUBLIC quill::quill)
 monad_compile_options(monad_execution_native)

@@ -13,6 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include <category/core/int.hpp>
 #include <category/core/runtime/uint256.hpp>
 
 #include <intx/intx.hpp>
@@ -29,9 +30,10 @@
 #include <string>
 #include <sys/types.h>
 #include <tuple>
+#include <utility>
 #include <vector>
 
-using namespace monad::vm::runtime;
+using namespace monad;
 
 static_assert(
     alignof(uint256_t) == alignof(::intx::uint256),
@@ -160,7 +162,7 @@ TEST(uint256, bit_width)
     test_bit_width<255>();
 }
 
-::intx::uint256 from_words(std::array<uint64_t, 4> words)
+::intx::uint256 from_words(std::array<uint64_t, 4> const words)
 {
     return ::intx::uint256{words[0], words[1], words[2], words[3]};
 }
@@ -352,23 +354,29 @@ TEST(uint256, constexpr_fallbacks)
     for (auto x : inputs) {
         for (auto y : inputs) {
             for (auto c : {true, false}) {
-                ASSERT_EQ(addc_constexpr(x, y, c), addc_intrinsic(x, y, c));
-                ASSERT_EQ(subb_constexpr(x, y, c), subb_intrinsic(x, y, c));
+                ASSERT_EQ(
+                    monad::uint256::portable::addc(x, y, c),
+                    monad::uint256::intrinsics::addc(x, y, c));
+                ASSERT_EQ(
+                    monad::uint256::portable::subb(x, y, c),
+                    monad::uint256::intrinsics::subb(x, y, c));
             }
             for (size_t shift = 0; shift < 64; shift++) {
                 auto shift_8 = static_cast<uint8_t>(shift);
                 ASSERT_EQ(
-                    shld_constexpr(x, y, shift_8),
-                    shld_intrinsic(x, y, shift_8));
+                    monad::uint256::portable::shld(x, y, shift_8),
+                    monad::uint256::intrinsics::shld(x, y, shift_8));
                 ASSERT_EQ(
-                    shrd_constexpr(x, y, shift_8),
-                    shrd_intrinsic(x, y, shift_8));
+                    monad::uint256::portable::shrd(x, y, shift_8),
+                    monad::uint256::intrinsics::shrd(x, y, shift_8));
             }
             for (auto v : inputs) {
                 if (x >= v || v == 0) {
                     continue;
                 }
-                ASSERT_EQ(div_constexpr(x, y, v), div_intrinsic(x, y, v));
+                ASSERT_EQ(
+                    monad::uint256::portable::div(x, y, v),
+                    monad::uint256::intrinsics::div(x, y, v));
             }
         }
     }
@@ -463,6 +471,14 @@ TEST(uint256, arithmetic)
         }
         ASSERT_EQ(-x, from_intx(-(to_intx(x))));
     }
+
+    // INT256_MIN / -1: EVM defines result as INT256_MIN (wraps, not UB)
+    constexpr uint256_t int256_min = {0, 0, 0, uint64_t{1} << 63};
+    constexpr uint256_t minus_one = {
+        ~uint64_t{0}, ~uint64_t{0}, ~uint64_t{0}, ~uint64_t{0}};
+    auto const [q, r] = sdivrem(int256_min, minus_one);
+    ASSERT_EQ(q, int256_min);
+    ASSERT_EQ(r, uint256_t{0});
 }
 
 template <size_t R, size_t M, size_t N>
@@ -470,8 +486,8 @@ void check_truncating_mul(
     words_t<M> const &x, words_t<N> const &y,
     words_t<M + N> const &full) noexcept
 {
-    auto const prod_rt = truncating_mul_runtime<R>(x, y);
-    auto const prod_ce = truncating_mul_constexpr<R>(x, y);
+    auto const prod_rt = monad::uint256::intrinsics::truncating_mul<R>(x, y);
+    auto const prod_ce = monad::uint256::portable::truncating_mul<R>(x, y);
     for (size_t i = 0; i < R; i++) {
         ASSERT_EQ(prod_rt[i], full[i]);
         ASSERT_EQ(prod_ce[i], full[i]);
@@ -499,7 +515,7 @@ TEST(uint256, multiplication)
         0xabcda1b2c3d41234};
     for (auto const &x : single_word_inputs) {
         for (auto const &y : single_word_inputs) {
-            auto const product_u128 = static_cast<uint128_t>(x) * y;
+            auto const product_u128 = static_cast<unsigned __int128>(x) * y;
             words_t<2> product{
                 static_cast<uint64_t>(product_u128),
                 static_cast<uint64_t>(product_u128 >> 64)};
@@ -691,25 +707,25 @@ TEST(uint256, shifts)
 TEST(uint256, load_store)
 {
     for (auto x : test_inputs) {
-        auto *le_bytes = std::bit_cast<uint8_t(*)[32]>(x.as_bytes());
-        ASSERT_EQ(x, uint256_t::load_le_unsafe(x.as_bytes()));
-        ASSERT_EQ(x, uint256_t::load_le(*le_bytes));
+        auto *le_bytes = std::bit_cast<uint8_t(*)[32]>(as_bytes(x));
+        ASSERT_EQ(x, load_le_unsafe<uint256_t>(as_bytes(x)));
+        ASSERT_EQ(x, load_le<uint256_t>(*le_bytes));
 
         uint8_t le_stored[32];
-        x.store_le(le_stored);
+        store_le(le_stored, x);
         ASSERT_EQ(0, std::memcmp(le_bytes, le_stored, 32));
-        ASSERT_EQ(x, uint256_t::load_le(le_stored));
+        ASSERT_EQ(x, load_le<uint256_t>(le_stored));
 
-        auto const x_be = x.to_be();
+        auto const x_be = bswap(x);
 
-        auto *be_bytes = std::bit_cast<uint8_t(*)[32]>(x_be.as_bytes());
-        ASSERT_EQ(x, uint256_t::load_be_unsafe(x_be.as_bytes()));
-        ASSERT_EQ(x, uint256_t::load_be(*be_bytes));
+        auto *be_bytes = std::bit_cast<uint8_t(*)[32]>(as_bytes(x_be));
+        ASSERT_EQ(x, load_be_unsafe<uint256_t>(as_bytes(x_be)));
+        ASSERT_EQ(x, load_be<uint256_t>(*be_bytes));
 
         uint8_t be_stored[32];
-        x.store_be(be_stored);
+        store_be(be_stored, x);
         ASSERT_EQ(0, std::memcmp(be_bytes, be_stored, 32));
-        ASSERT_EQ(x, uint256_t::load_be(be_stored));
+        ASSERT_EQ(x, load_be<uint256_t>(be_stored));
     }
 }
 
@@ -780,4 +796,10 @@ TEST(uint256, string_conversion)
         "129639945";
     ASSERT_THROW(
         uint256_t::from_string(out_of_range_78_digits), std::out_of_range);
+
+    ASSERT_EQ(uint256_t::from_string("0X1a2b"), uint256_t{0x1a2b});
+    ASSERT_EQ(uint256_t::from_string("0Xff"), uint256_t{0xff});
+    ASSERT_THROW(uint256_t::from_string(""), std::invalid_argument);
+    ASSERT_THROW(uint256_t::from_string("0x"), std::invalid_argument);
+    ASSERT_THROW(uint256_t::from_string("0X"), std::invalid_argument);
 }

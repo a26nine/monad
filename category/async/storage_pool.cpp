@@ -17,10 +17,11 @@
 
 #include <category/async/config.hpp>
 #include <category/async/detail/scope_polyfill.hpp>
-#include <category/async/detail/start_lifetime_as_polyfill.hpp>
 #include <category/async/util.hpp>
 #include <category/core/assert.h>
+#include <category/core/detail/start_lifetime_as_polyfill.hpp>
 #include <category/core/hash.hpp>
+#include <category/core/log.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -41,8 +42,6 @@
 
 #include <stdlib.h>
 
-#include <quill/Quill.h>
-
 #include <asm-generic/ioctl.h>
 #include <fcntl.h>
 #include <linux/falloc.h>
@@ -54,6 +53,10 @@
 #include <unistd.h>
 
 MONAD_ASYNC_NAMESPACE_BEGIN
+
+// DBs created before the num_cnv_chunks footer field existed store 0 there;
+// such pools were always carved with this many conventional chunks.
+static constexpr uint32_t legacy_default_num_cnv_chunks = 3;
 
 std::filesystem::path storage_pool::device_t::current_path() const
 {
@@ -85,7 +88,8 @@ size_t storage_pool::device_t::chunks() const
 size_t storage_pool::device_t::cnv_chunks() const
 {
     MONAD_ASSERT(!is_zoned_device(), "zonefs support isn't implemented yet");
-    return metadata_->num_cnv_chunks;
+    return metadata_->num_cnv_chunks == 0 ? legacy_default_num_cnv_chunks
+                                          : metadata_->num_cnv_chunks;
 }
 
 std::pair<file_offset_t, file_offset_t> storage_pool::device_t::capacity() const
@@ -147,8 +151,8 @@ storage_pool::chunk_t::~chunk_t()
     }
 }
 
-std::pair<int, file_offset_t>
-storage_pool::chunk_t::write_fd(size_t bytes_which_shall_be_written) noexcept
+std::pair<int, file_offset_t> storage_pool::chunk_t::write_fd(
+    size_t const bytes_which_shall_be_written) noexcept
 {
     if (device().is_file() || device().is_block_device()) {
         if (!append_only_) {
@@ -333,9 +337,10 @@ bool storage_pool::chunk_t::try_trim_contents(uint32_t bytes)
 /***************************************************************************/
 
 storage_pool::device_t storage_pool::make_device_(
-    mode op, device_t::type_t_ type, std::filesystem::path const &path, int fd,
+    mode const op, device_t::type_t_ const type,
+    std::filesystem::path const &path, int const fd,
     std::variant<uint64_t, device_t const *> dev_no_or_dev,
-    creation_flags flags)
+    creation_flags const flags)
 {
     int readwritefd = fd;
     uint64_t const chunk_capacity = 1ULL << flags.chunk_capacity;
@@ -474,16 +479,18 @@ storage_pool::device_t storage_pool::make_device_(
         }
         total_size =
             metadata_footer->total_size(static_cast<size_t>(stat.st_size));
-        if (flags.num_cnv_chunks > metadata_footer->num_cnv_chunks) {
+        uint32_t const stored_num_cnv_chunks =
+            metadata_footer->num_cnv_chunks == 0
+                ? legacy_default_num_cnv_chunks
+                : metadata_footer->num_cnv_chunks;
+        if (flags.num_cnv_chunks > stored_num_cnv_chunks) {
             LOG_WARNING(
                 "Flag-specified num_cnv_chunks ({}) is greater than the value "
                 "stored in metadata ({}). This setting will be ignored. "
                 "Existing databases cannot be reconfigured to use more chunks, "
                 "create a new database if you need a higher num_cnv_chunks.",
                 flags.num_cnv_chunks,
-                metadata_footer->num_cnv_chunks == 0
-                    ? 3
-                    : metadata_footer->num_cnv_chunks);
+                stored_num_cnv_chunks);
         }
     }
     size_t const offset = round_down_align<CPU_PAGE_BITS>(
@@ -524,13 +531,8 @@ void storage_pool::fill_chunks_(creation_flags const &flags)
         fnv1a_hash<uint32_t>::add(
             hashshouldbe, uint32_t(device.unique_hash_ >> 32));
     }
-    // Backward compatibility: databases created before `num_cnv_chunks` was
-    // added have this field set to 0. Treat 0 as the legacy default of 3
-    // chunks.
     uint32_t const cnv_chunks_count =
-        devices_[0].metadata_->num_cnv_chunks == 0
-            ? 3
-            : devices_[0].metadata_->num_cnv_chunks;
+        static_cast<uint32_t>(devices_[0].cnv_chunks());
     std::vector<size_t> chunks;
     size_t total = 0;
     chunks.reserve(devices_.size());
@@ -653,9 +655,11 @@ void storage_pool::fill_chunks_(creation_flags const &flags)
     }
 }
 
-storage_pool::storage_pool(storage_pool const *src, clone_as_read_only_tag_)
+storage_pool::storage_pool(
+    storage_pool const *const src, clone_as_read_only_tag_)
     : is_read_only_(true)
     , is_read_only_allow_dirty_(false)
+    , is_migration_allowed_(false)
     , is_newly_truncated_(false)
 {
     devices_.reserve(src->devices_.size());
@@ -706,10 +710,11 @@ storage_pool::storage_pool(storage_pool const *src, clone_as_read_only_tag_)
 }
 
 storage_pool::storage_pool(
-    std::span<std::filesystem::path const> sources, mode mode,
-    creation_flags flags)
+    std::span<std::filesystem::path const> const sources, mode const mode,
+    creation_flags const flags)
     : is_read_only_(flags.open_read_only || flags.open_read_only_allow_dirty)
     , is_read_only_allow_dirty_(flags.open_read_only_allow_dirty)
+    , is_migration_allowed_(flags.allow_migration)
     , is_newly_truncated_(mode == mode::truncate)
 {
     devices_.reserve(sources.size());
@@ -759,7 +764,7 @@ storage_pool::storage_pool(
     fill_chunks_(flags);
 }
 
-storage_pool::storage_pool(use_anonymous_inode_tag, creation_flags flags)
+storage_pool::storage_pool(use_anonymous_inode_tag, creation_flags const flags)
     : storage_pool::storage_pool(
           use_anonymous_sized_inode_tag{},
           1ULL * 1024 * 1024 * 1024 * 1024 + 24576, flags)
@@ -767,9 +772,10 @@ storage_pool::storage_pool(use_anonymous_inode_tag, creation_flags flags)
 }
 
 storage_pool::storage_pool(
-    use_anonymous_sized_inode_tag, off_t len, creation_flags flags)
+    use_anonymous_sized_inode_tag, off_t const len, creation_flags const flags)
     : is_read_only_(flags.open_read_only || flags.open_read_only_allow_dirty)
     , is_read_only_allow_dirty_(flags.open_read_only_allow_dirty)
+    , is_migration_allowed_(flags.allow_migration)
     , is_newly_truncated_(false)
 {
     int const fd = make_temporary_inode();
@@ -823,7 +829,8 @@ storage_pool::~storage_pool()
     devices_.clear();
 }
 
-storage_pool::chunk_t &storage_pool::chunk(chunk_type which, uint32_t id)
+storage_pool::chunk_t &
+storage_pool::chunk(chunk_type const which, uint32_t const id)
 {
     std::unique_lock const g(lock_);
     if (id >= chunks_[which].size()) {

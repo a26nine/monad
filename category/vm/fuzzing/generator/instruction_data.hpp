@@ -129,17 +129,17 @@ namespace monad::vm::fuzzing
     };
 
     constexpr auto uncommon_non_terminators = make_opcode_array<
-        EvmTraits<EVMC_OSAKA>, uncommon_non_terminators_all>();
-    constexpr auto common_non_terminators =
-        make_opcode_array<EvmTraits<EVMC_OSAKA>, common_non_terminators_all>();
+        EvmTraits<MONAD_ETH_OSAKA>, uncommon_non_terminators_all>();
+    constexpr auto common_non_terminators = make_opcode_array<
+        EvmTraits<MONAD_ETH_OSAKA>, common_non_terminators_all>();
     constexpr auto terminators =
-        make_opcode_array<EvmTraits<EVMC_OSAKA>, terminators_all>();
+        make_opcode_array<EvmTraits<MONAD_ETH_OSAKA>, terminators_all>();
     constexpr auto exit_terminators =
-        make_opcode_array<EvmTraits<EVMC_OSAKA>, exit_terminators_all>();
+        make_opcode_array<EvmTraits<MONAD_ETH_OSAKA>, exit_terminators_all>();
     constexpr auto jump_terminators =
-        make_opcode_array<EvmTraits<EVMC_OSAKA>, jump_terminators_all>();
+        make_opcode_array<EvmTraits<MONAD_ETH_OSAKA>, jump_terminators_all>();
 
-    constexpr bool is_exit_terminator(std::uint8_t opcode) noexcept
+    constexpr bool is_exit_terminator(uint8_t const opcode) noexcept
     {
         return std::find(
                    exit_terminators_all.begin(),
@@ -149,8 +149,7 @@ namespace monad::vm::fuzzing
 
     static_assert(is_exit_terminator(STOP));
 
-    std::vector<std::uint8_t> const &
-    memory_operands(std::uint8_t const opcode) noexcept;
+    std::vector<uint8_t> const &memory_operands(uint8_t opcode) noexcept;
 
-    bool uses_memory(std::uint8_t const opcode) noexcept;
+    bool uses_memory(uint8_t opcode) noexcept;
 }

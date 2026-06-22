@@ -39,7 +39,6 @@ endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-option(MONAD_COMPILER_LLVM "Build llvm backend" OFF)
 option(MONAD_COMPILER_COVERAGE "Build with coverage" OFF)
 option(MONAD_COMPILER_TESTING "Build compiler tests" OFF)
 option(MONAD_COMPILER_BENCHMARKS "Build compiler benchmarks" OFF)
@@ -63,44 +62,9 @@ include(cmake/test.cmake)
 
 set(THIRD_PARTY_DIR "${PROJECT_SOURCE_DIR}/third_party")
 
-function(monad_compile_options target)
-  set_property(TARGET ${target} PROPERTY C_STANDARD 23)
-  set_property(TARGET ${target} PROPERTY C_STANDARD_REQUIRED ON)
-  set_property(TARGET ${target} PROPERTY CXX_STANDARD 23)
-  set_property(TARGET ${target} PROPERTY CXX_STANDARD_REQUIRED ON)
+include(cmake/compile_options.cmake)
 
-  target_compile_options(${target} PRIVATE -Wall -Wextra -Wconversion -Werror)
-  target_compile_definitions(${target} PUBLIC "_GNU_SOURCE")
-
-  target_compile_options(
-    ${target} PRIVATE $<$<CXX_COMPILER_ID:GNU>:-Wno-missing-field-initializers>)
-
-  target_compile_definitions(${target} PUBLIC QUILL_ROOT_LOGGER_ONLY)
-
-  if(MONAD_COMPILER_TESTING)
-    target_compile_definitions(${target} PUBLIC "MONAD_COMPILER_TESTING=1")
-  endif()
-
-  if(MONAD_COMPILER_STATS)
-      target_compile_definitions(${target} PUBLIC "MONAD_COMPILER_STATS=1")
-  endif()
-
-  if(MONAD_COMPILER_HOT_PATH_STATS)
-      target_compile_definitions(${target} PUBLIC "MONAD_COMPILER_HOT_PATH_STATS=1")
-  endif()
-
-  target_compile_options(
-    ${target}
-    PUBLIC $<$<CXX_COMPILER_ID:GNU>:-Wno-attributes=clang::no_sanitize>)
-
-  # this is needed to turn off ranges support in nlohmann_json, because the
-  # ranges standard header triggers a clang bug which is fixed in trunk but not
-  # currently available to us
-  # https://gcc.gnu.org/bugzilla//show_bug.cgi?id=109647
-  target_compile_definitions(${target} PUBLIC "JSON_HAS_RANGES=0")
-endfunction()
-
-find_package(Boost REQUIRED COMPONENTS fiber json CONFIG)
+find_package(Boost REQUIRED COMPONENTS context filesystem json CONFIG)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(brotli REQUIRED IMPORTED_TARGET libbrotlienc libbrotlidec)
 pkg_check_modules(crypto++ REQUIRED IMPORTED_TARGET libcrypto++)
@@ -115,7 +79,17 @@ set(ASMJIT_STATIC ON)
 add_subdirectory(third_party/asmjit)
 
 # BLAKE3
+# Force STATIC even when BUILD_SHARED_LIBS=ON (e.g. cargo / cmake-rs).
+# Some monad code calls private BLAKE3 helpers directly for performance.
+# Those helpers have hidden visibility, so a SHARED libblake3.so does not
+# export them; linking SHARED would then leave libmonad_execution.so with
+# unresolved references that fail at runtime when a consumer loads it.
+# Static linkage absorbs blake3's objects directly so the helpers resolve
+# at link time. The default (static) cmake build was already fine.
+block()
+set(BUILD_SHARED_LIBS OFF)
 add_subdirectory(third_party/BLAKE3/c)
+endblock()
 
 # blst
 set(DOWNLOAD_BLST OFF)
@@ -136,6 +110,37 @@ add_subdirectory("third_party/cthash")
 # ethash
 set(ETHASH_TESTING NO)
 add_subdirectory("third_party/ethash")
+# ethash carries clang::no_sanitize attributes that GCC ignores and warns about.
+# Match the narrow, GNU-only form monad_compile_options() uses above.
+target_compile_options(
+  ethash PRIVATE $<$<CXX_COMPILER_ID:GNU>:-Wno-attributes=clang::no_sanitize>)
+
+# fiber (boost)
+# Boost.Fiber's CMakeLists.txt expects granular Boost targets from the
+# superproject build. The system-installed Boost only provides Boost::headers
+# for header-only libs. Create shim targets so fiber can link them.
+foreach(_boost_hdr_lib assert config core intrusive predef smart_ptr algorithm format)
+  if(NOT TARGET Boost::${_boost_hdr_lib})
+    add_library(boost_${_boost_hdr_lib} INTERFACE)
+    target_link_libraries(boost_${_boost_hdr_lib} INTERFACE Boost::headers)
+    add_library(Boost::${_boost_hdr_lib} ALIAS boost_${_boost_hdr_lib})
+  endif()
+endforeach()
+add_subdirectory("third_party/fiber" SYSTEM)
+# Boost.Fiber triggers warnings under C++23 strict flags.
+target_compile_options(boost_fiber PRIVATE -Wno-deprecated-declarations -Wno-conversion)
+# Some upstream fiber tests include <boost/bind.hpp>, which emits a #pragma
+# message about global-namespace placeholders. It's a raw message (not a
+# deprecation warning), so -Wno-* can't suppress it; retain the legacy
+# behavior to silence it. The test subdirectory is only traversed under the
+# same condition fiber itself uses, so mirror it before querying the targets.
+if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fiber/test/CMakeLists.txt")
+  get_property(_fiber_test_targets DIRECTORY "third_party/fiber/test"
+    PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(_t ${_fiber_test_targets})
+    target_compile_definitions(${_t} PRIVATE BOOST_BIND_GLOBAL_PLACEHOLDERS)
+  endforeach()
+endif()
 
 # immer
 option(immer_BUILD_TESTS OFF)
@@ -159,19 +164,6 @@ endif()
 add_library(komihash INTERFACE)
 target_include_directories(komihash INTERFACE "third_party/komihash")
 
-# LLVM
-# Because LLVM is a large dependency, we only try to find it if it's
-# explicitly enabled as part of the VM build: regular client builds don't need
-# to use it.
-if(UTILS_CLANG_TIDY_AUTO_CONST OR MONAD_COMPILER_LLVM)
-  include(cmake/LinkLLVM.cmake)
-  find_package(LLVM 19.1.7 REQUIRED CONFIG)
-endif()
-
-if(MONAD_COMPILER_LLVM)
-  add_definitions(-DMONAD_COMPILER_LLVM)
-endif()
-
 # magic_enum
 add_subdirectory("third_party/magic_enum")
 
@@ -190,6 +182,9 @@ target_compile_options(
     $<$<AND:$<CXX_COMPILER_ID:GNU>,$<CONFIG:Release>>:-Wno-stringop-overflow>)
 target_compile_options(
   quill PUBLIC $<$<CXX_COMPILER_ID:GNU>:-Wno-tautological-compare>)
+# quill's own sources use the deprecated std::wstring_convert. PRIVATE so it
+# does not disable warnings in our code that includes quill headers.
+target_compile_options(quill PRIVATE -Wno-deprecated-declarations)
 
 # silkpre
 set(OPTIONAL_BUILD_TESTS OFF)
@@ -200,6 +195,15 @@ set(CMAKE_POLICY_VERSION_MINIMUM "${OLD_CMAKE_POLICY_VERSION_MINIMUM}")
 # undo the injection of ccache silkpre/ff does
 set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE)
 set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK)
+# libff (pulled in by silkpre) trips several warnings under our flags: unused
+# parameters/constants in stubbed-out code, and an uninitialized timespec in its
+# profiling clock helper (only flagged once the optimizer runs).
+target_compile_options(
+  ff
+  PRIVATE -Wno-unused-parameter -Wno-unused-const-variable -Wno-uninitialized)
+
+# silkpre_vendor (vendored sha256 + rmd160)
+add_subdirectory("third_party/silkpre_vendor")
 
 # tbb
 find_package(TBB REQUIRED)
@@ -281,6 +285,23 @@ function(monad_add_test_death target)
 endfunction()
 
 # ##############################################################################
+# version
+# ##############################################################################
+
+# Embedded in --help output of the C++ binaries. Honors a build-time override
+# (e.g. set by CI) so containerized builds without a .git directory can still
+# stamp the binary.
+if(DEFINED ENV{GIT_COMMIT_HASH})
+  set(GIT_COMMIT_HASH $ENV{GIT_COMMIT_HASH})
+else()
+  execute_process(
+    COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_COMMIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+endif()
+
+# ##############################################################################
 # libs
 # ##############################################################################
 
@@ -306,7 +327,6 @@ target_link_libraries(
          monad_rpc
          monad_statesync
          monad-vm
-         monad-vm-core
          monad-vm-compiler
          monad-vm-evm
          monad-vm-interpreter
@@ -323,6 +343,7 @@ add_subdirectory(${PROJECT_SOURCE_DIR}/cmd)
 # unit tests
 # ##############################################################################
 
+add_subdirectory(${PROJECT_SOURCE_DIR}/test/utils)
 add_subdirectory(${PROJECT_SOURCE_DIR}/test/ethereum_test)
 add_subdirectory(${PROJECT_SOURCE_DIR}/test/unit/common)
 add_subdirectory(${PROJECT_SOURCE_DIR}/test/vm)

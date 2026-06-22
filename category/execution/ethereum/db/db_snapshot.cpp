@@ -17,16 +17,17 @@
 #include <category/core/byte_string.hpp>
 #include <category/core/config.hpp>
 #include <category/core/endian.hpp> // little endian
+#include <category/core/log.hpp>
 #include <category/core/nibble.h>
-#include <category/core/unaligned.hpp>
+#include <category/core/runtime/unaligned.hpp>
 #include <category/execution/ethereum/core/rlp/block_rlp.hpp>
 #include <category/execution/ethereum/db/db_snapshot.h>
+#include <category/execution/ethereum/db/state_machine_init.hpp>
 #include <category/execution/ethereum/db/util.hpp>
 #include <category/mpt/db.hpp>
 #include <category/mpt/ondisk_db_config.hpp>
 
 #include <ankerl/unordered_dense.h>
-#include <quill/Quill.h>
 
 #include <deque>
 #include <limits>
@@ -34,7 +35,6 @@
 struct monad_db_snapshot_loader
 {
     uint64_t block;
-    monad::OnDiskMachine machine;
     monad::mpt::Db db;
     monad::mpt::Node::SharedPtr root;
     std::array<monad::byte_string, 256> eth_headers;
@@ -52,18 +52,17 @@ struct monad_db_snapshot_loader
         uint64_t const block, char const *const *const dbname_paths,
         size_t const len, unsigned const sq_thread_cpu)
         : block{block}
-        , db{machine,
-             monad::mpt::OnDiskDbConfig{
-                 .append = true,
-                 .compaction = false,
-                 .rd_buffers = 8192,
-                 .wr_buffers = 32,
-                 .uring_entries = 128,
-                 .sq_thread_cpu =
-                     sq_thread_cpu == std::numeric_limits<unsigned>::max()
-                         ? std::nullopt
-                         : std::make_optional(sq_thread_cpu),
-                 .dbname_paths = {dbname_paths, dbname_paths + len}}}
+        , db{monad::mpt::OnDiskDbConfig{
+              .append = true,
+              .compaction = false,
+              .rd_buffers = 8192,
+              .wr_buffers = 32,
+              .uring_entries = 128,
+              .sq_thread_cpu =
+                  sq_thread_cpu == std::numeric_limits<unsigned>::max()
+                      ? std::nullopt
+                      : std::make_optional(sq_thread_cpu),
+              .dbname_paths = {dbname_paths, dbname_paths + len}}}
         , bytes_read{0}
     {
     }
@@ -167,7 +166,8 @@ private:
     uint8_t length_{0};
 
 public:
-    void append(unsigned char branch, monad::mpt::NibblesView node_path)
+    void
+    append(unsigned char const branch, monad::mpt::NibblesView const node_path)
     {
         using namespace monad::mpt;
         unsigned const src_nibbles = node_path.nibble_size();
@@ -187,7 +187,7 @@ public:
         length_ = static_cast<uint8_t>(length_ + src_nibbles);
     }
 
-    void pop(uint8_t nibble_count)
+    void pop(uint8_t const nibble_count)
     {
         MONAD_ASSERT(length_ >= nibble_count);
         length_ -= nibble_count;
@@ -222,7 +222,8 @@ struct MonadSnapshotTraverseMachine : public monad::mpt::TraverseMachine
         uint64_t (*write)(
             uint64_t shard, monad_snapshot_type, unsigned char const *bytes,
             size_t len, void *user),
-        void *user, uint64_t const total_shards, uint64_t const shard_number)
+        void *const user, uint64_t const total_shards,
+        uint64_t const shard_number)
         : nibble{monad::mpt::INVALID_BRANCH}
         , path{}
         , account_bytes_written{account_bytes_written}
@@ -441,6 +442,9 @@ monad_db_snapshot_loader *monad_db_snapshot_loader_create(
     uint64_t const block, char const *const *const dbname_paths,
     size_t const len, unsigned const sq_thread_cpu)
 {
+    // C ABI entry — populate the kind registry before the metadata-driven
+    // Db ctor runs inside monad_db_snapshot_loader. Idempotent.
+    monad::register_ethereum_state_machines();
     auto *loader =
         new monad_db_snapshot_loader(block, dbname_paths, len, sq_thread_cpu);
     MONAD_ASSERT_PRINTF(
@@ -536,7 +540,7 @@ void monad_db_snapshot_loader_load(
     monad_db_snapshot_loader_flush(loader);
 }
 
-void monad_db_snapshot_loader_destroy(monad_db_snapshot_loader *loader)
+void monad_db_snapshot_loader_destroy(monad_db_snapshot_loader *const loader)
 {
     using namespace monad;
     using namespace monad::mpt;

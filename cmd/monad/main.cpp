@@ -20,20 +20,23 @@
 
 #include <category/core/assert.h>
 #include <category/core/basic_formatter.hpp>
+#include <category/core/cli/help_formatter.hpp>
 #include <category/core/config.hpp>
 #include <category/core/fiber/priority_pool.hpp>
 #include <category/core/likely.h>
+#include <category/core/log.hpp>
 #include <category/core/monad_exception.hpp>
 #include <category/core/procfs/statm.h>
 #include <category/execution/ethereum/block_hash_buffer.hpp>
 #include <category/execution/ethereum/chain/chain_config.h>
 #include <category/execution/ethereum/chain/ethereum_mainnet.hpp>
 #include <category/execution/ethereum/chain/genesis_state.hpp>
+#include <category/execution/ethereum/chain/hive_net.hpp>
 #include <category/execution/ethereum/core/fmt/bytes_fmt.hpp>
 #include <category/execution/ethereum/core/log_level_map.hpp>
 #include <category/execution/ethereum/core/rlp/block_rlp.hpp>
 #include <category/execution/ethereum/db/block_db.hpp>
-#include <category/execution/ethereum/db/db_cache.hpp>
+#include <category/execution/ethereum/db/state_machine_init.hpp>
 #include <category/execution/ethereum/db/trie_db.hpp>
 #include <category/execution/ethereum/event/exec_event_ctypes.h>
 #include <category/execution/ethereum/precompiles.hpp>
@@ -50,11 +53,9 @@
 
 #include <CLI/CLI.hpp>
 
-#include <quill/LogLevel.h>
-#include <quill/Quill.h>
-#include <quill/handlers/FileHandler.h>
-
 #include <boost/outcome/try.hpp>
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -117,7 +118,9 @@ try {
     cxx_runtime_terminate_handler = std::get_terminate();
     std::set_terminate(backtrace_terminate_handler);
 
-    CLI::App cli{"monad"};
+    CLI::App cli{
+        "Run the Monad execution engine against a block database.", "monad"};
+    monad::cli::HelpFormatter{GIT_COMMIT_HASH}.install(cli);
     cli.option_defaults()->always_capture_default();
 
     monad_chain_config chain_config;
@@ -131,18 +134,21 @@ try {
     std::chrono::seconds block_db_timeout = std::chrono::seconds::zero();
     std::string exec_event_ring_config;
     unsigned sq_thread_cpu = static_cast<unsigned>(get_nprocs() - 1);
+    bool disable_sq_thread_cpu = false;
     std::optional<unsigned> ro_sq_thread_cpu;
     std::vector<fs::path> dbname_paths;
     fs::path snapshot;
     fs::path dump_snapshot;
     std::string statesync;
+    fs::path chain_rlp_path;
     auto log_level = quill::LogLevel::Info;
 
     std::unordered_map<std::string, monad_chain_config> const CHAIN_CONFIG_MAP =
         {{"ethereum_mainnet", CHAIN_CONFIG_ETHEREUM_MAINNET},
          {"monad_devnet", CHAIN_CONFIG_MONAD_DEVNET},
          {"monad_testnet", CHAIN_CONFIG_MONAD_TESTNET},
-         {"monad_mainnet", CHAIN_CONFIG_MONAD_MAINNET}};
+         {"monad_mainnet", CHAIN_CONFIG_MONAD_MAINNET},
+         {"hive_net", CHAIN_CONFIG_HIVE_NET}};
 
     cli.add_option("--chain", chain_config, "select which chain config to run")
         ->transform(CLI::CheckedTransformer(CHAIN_CONFIG_MAP, CLI::ignore_case))
@@ -160,6 +166,11 @@ try {
         sq_thread_cpu,
         "sq_thread_cpu field in io_uring_params, to specify the cpu set "
         "kernel poll thread is bound to in SQPOLL mode");
+    cli.add_flag(
+        "--disable-sq-thread-cpu,--disable_sq_thread_cpu",
+        disable_sq_thread_cpu,
+        "disable SQPOLL for the rw db (skip the kernel io_uring poll "
+        "thread); --sq-thread-cpu is ignored when set");
     cli.add_option(
         "--ro-sq-thread-cpu,--ro_sq_thread_cpu",
         ro_sq_thread_cpu,
@@ -186,6 +197,7 @@ try {
            block_db_timeout,
            "timeout in seconds for reading blocks from blockdb (0 = no retry)")
         ->needs(as_eth_blocks_flag);
+    cli.add_option("--chain-rlp", chain_rlp_path, "path to chain rlp file");
     auto *const group =
         cli.add_option_group("load", "methods to initialize the db");
     group
@@ -230,17 +242,7 @@ try {
         return cli.exit(e);
     }
 
-    auto stdout_handler = quill::stdout_handler();
-    stdout_handler->set_pattern(
-        "%(time) [%(thread_id)] %(file_name):%(line_number) LOG_%(log_level)\t"
-        "%(message)",
-        "%Y-%m-%d %H:%M:%S.%Qns",
-        quill::Timezone::GmtTime);
-    quill::Config cfg;
-    cfg.default_handlers.emplace_back(stdout_handler);
-    quill::configure(cfg);
-    quill::start(true);
-    quill::get_root_logger()->set_log_level(log_level);
+    init_root_logger(log_level);
     LOG_INFO("running with commit '{}'", GIT_COMMIT_HASH);
 
     // Initialize the event system if --exec-event-ring is specified
@@ -262,10 +264,7 @@ try {
     }
 
 #ifdef ENABLE_EVENT_TRACING
-    quill::FileHandlerConfig handler_cfg;
-    handler_cfg.set_pattern("%(message)", "");
-    event_tracer = quill::create_logger(
-        "event_trace", quill::file_handler(trace_log, handler_cfg));
+    event_tracer = create_event_tracer(trace_log);
 #endif
 
     MONAD_ASSERT(init_trusted_setup());
@@ -278,24 +277,26 @@ try {
     if (!statesync.empty()) {
         net.emplace(statesync.c_str());
     }
-    std::unique_ptr<mpt::StateMachine> machine;
-    mpt::Db db = [&] {
+    // The on-disk Db ctor reads the persisted state_machine_kind from
+    // db_metadata and constructs the StateMachine via the registry. The
+    // in-memory path has no metadata to read from and constructs the SM
+    // inline.
+    register_ethereum_state_machines();
+    mpt::Db raw_db = [&] {
         if (!db_in_memory) {
-            machine = std::make_unique<OnDiskMachine>();
-            return mpt::Db{
-                *machine,
-                mpt::OnDiskDbConfig{
-                    .append = true,
-                    .compaction = !no_compaction,
-                    .rewind_to_latest_finalized = true,
-                    .rd_buffers = 8192,
-                    .wr_buffers = 32,
-                    .uring_entries = 128,
-                    .sq_thread_cpu = sq_thread_cpu,
-                    .dbname_paths = dbname_paths}};
+            return mpt::Db{mpt::OnDiskDbConfig{
+                .append = true,
+                .compaction = !no_compaction,
+                .rewind_to_latest_finalized = true,
+                .rd_buffers = 8192,
+                .wr_buffers = 32,
+                .uring_entries = 128,
+                .sq_thread_cpu = disable_sq_thread_cpu
+                                     ? std::optional<unsigned>{}
+                                     : std::optional<unsigned>{sq_thread_cpu},
+                .dbname_paths = dbname_paths}};
         }
-        machine = std::make_unique<InMemoryMachine>();
-        return mpt::Db{*machine};
+        return mpt::Db{std::make_unique<InMemoryMachine>()};
     }();
 
     auto chain = [chain_config] -> std::unique_ptr<Chain> {
@@ -308,11 +309,16 @@ try {
             return std::make_unique<MonadTestnet>();
         case CHAIN_CONFIG_MONAD_MAINNET:
             return std::make_unique<MonadMainnet>();
+        case CHAIN_CONFIG_HIVE_NET:
+            return std::make_unique<HiveNet>();
         }
         MONAD_ASSERT(false);
     }();
 
-    TrieDb triedb{db}; // init block number to latest finalized block
+    TrieDb triedb{
+        raw_db,
+        /*enable_multiblock_cache=*/true}; // init block number to latest
+                                           // finalized block
     // Note: in memory db block number is always zero
     uint64_t const init_block_num = [&] {
         if (!snapshot.empty()) {
@@ -324,13 +330,13 @@ try {
             std::ifstream accounts(snapshot / "accounts");
             std::ifstream code(snapshot / "code");
             auto const n = std::stoul(snapshot.stem());
-            auto root = load_from_binary(db, accounts, code, n);
+            auto root = load_from_binary(raw_db, accounts, code, n);
             // load the eth header for snapshot
             BlockDb block_db{block_db_path};
             Block block;
             MONAD_ASSERT_PRINTF(
                 block_db.get(n, block), "FATAL: Could not load block %lu", n);
-            root = load_header(std::move(root), db, block.header);
+            root = load_header(std::move(root), raw_db, block.header);
             triedb.reset_root(std::move(root), n);
         }
         else if (triedb.get_root() == nullptr) {
@@ -356,8 +362,8 @@ try {
         "last verified block = {}, state root = {}, time elapsed "
         "= {}",
         init_block_num,
-        db.get_latest_finalized_version(),
-        db.get_latest_verified_version(),
+        raw_db.get_latest_finalized_version(),
+        raw_db.get_latest_verified_version(),
         triedb.state_root(),
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - load_start_time));
@@ -387,7 +393,9 @@ try {
     }
     if (!initialized_headers_from_triedb) {
         BlockDb block_db{block_db_path};
-        MONAD_ASSERT(chain_config == CHAIN_CONFIG_ETHEREUM_MAINNET);
+        MONAD_ASSERT(
+            chain_config == CHAIN_CONFIG_ETHEREUM_MAINNET ||
+            chain_config == CHAIN_CONFIG_HIVE_NET);
         MONAD_ASSERT(init_block_hash_buffer_from_blockdb(
             block_db, start_block_num, block_hash_buffer));
     }
@@ -408,17 +416,17 @@ try {
     // If call tracing is enabled, we need to correspondingly disable native
     // compilation: the compiler does not expose the full fidelity of error exit
     // codes that are required to serve RPC responses that include call traces.
-    vm::VM vm{!trace_calls};
+    vm::VM vm{trace_calls ? vm::VM::InterpreterOnly : vm::VM::Dual};
 
-    DbCache db_cache =
-        sync_server ? DbCache{*sync_server->ctx} : DbCache{triedb};
+    Db &db = sync_server ? static_cast<Db &>(*sync_server->ctx)
+                         : static_cast<Db &>(triedb);
     auto const result = [&] {
         switch (chain_config) {
         case CHAIN_CONFIG_ETHEREUM_MAINNET:
             return runloop_ethereum(
                 *chain,
                 block_db_path,
-                db_cache,
+                db,
                 vm,
                 block_hash_buffer,
                 priority_pool,
@@ -426,6 +434,19 @@ try {
                 end_block_num,
                 stop,
                 trace_calls);
+        case CHAIN_CONFIG_HIVE_NET:
+            return runloop_ethereum(
+                *chain,
+                block_db_path,
+                db,
+                vm,
+                block_hash_buffer,
+                priority_pool,
+                block_num,
+                end_block_num,
+                stop,
+                trace_calls,
+                chain_rlp_path);
         case CHAIN_CONFIG_MONAD_DEVNET:
         case CHAIN_CONFIG_MONAD_TESTNET:
         case CHAIN_CONFIG_MONAD_MAINNET:
@@ -433,7 +454,7 @@ try {
                 return runloop_monad_ethblocks(
                     dynamic_cast<MonadChain const &>(*chain),
                     block_db_path,
-                    db_cache,
+                    db,
                     vm,
                     block_hash_buffer,
                     priority_pool,
@@ -447,8 +468,8 @@ try {
                 return runloop_monad(
                     dynamic_cast<MonadChain const &>(*chain),
                     block_db_path,
+                    raw_db,
                     db,
-                    db_cache,
                     vm,
                     block_hash_buffer,
                     priority_pool,

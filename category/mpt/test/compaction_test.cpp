@@ -17,12 +17,12 @@
 #include "test_fixtures_gtest.hpp"
 
 #include <category/async/config.hpp>
+#include <category/core/test_util/gtest_signal_stacktrace_printer.hpp> // NOLINT
 #include <category/mpt/config.hpp>
+#include <category/mpt/detail/timeline.hpp>
 #include <category/mpt/node.hpp>
 #include <category/mpt/trie.hpp>
 #include <category/mpt/update.hpp>
-
-#include <category/core/test_util/gtest_signal_stacktrace_printer.hpp> // NOLINT
 
 #include <cstddef>
 #include <iostream>
@@ -46,7 +46,7 @@ TEST_F(CompactionTest, first_chunk_is_compacted)
 {
     std::vector<Update> updates;
     auto const fast_list_ids = state()->fast_list_ids();
-    for (auto &i : state()->keys) {
+    for (auto const &i : state()->keys) {
         if (i.second > fast_list_ids[0].first) {
             break;
         }
@@ -64,7 +64,11 @@ TEST_F(CompactionTest, first_chunk_is_compacted)
         std::move(state()->root),
         state()->sm,
         std::move(update_ls),
-        state()->version++);
+        state()->version++,
+        /*compaction=*/false,
+        /*can_write_to_fast=*/true,
+        /*write_root=*/true,
+        timeline_id::primary);
     std::cout << "\nBefore compaction:";
     state()->print(std::cout);
     // TODO DO COMPACTION

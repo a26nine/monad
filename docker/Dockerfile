@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1-labs
 
-FROM ubuntu:25.10 AS base
+FROM ubuntu:26.04 AS base
 
 COPY scripts/ubuntu-build/ /opt
 
@@ -32,16 +32,17 @@ COPY . src
 ARG CC
 ARG CXX
 ARG CMAKE_BUILD_TYPE
+ARG TOOLCHAIN
 ARG GIT_COMMIT_HASH
 
 ENV GIT_COMMIT_HASH=$GIT_COMMIT_HASH
 
-RUN cd src && CC=${CC:?} CXX=${CXX:?} CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:?} CFLAGS="-march=haswell" CXXFLAGS="-march=haswell" ASMFLAGS="-march=haswell" ./scripts/configure.sh
+RUN cd src && CC=${CC:?} CXX=${CXX:?} CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:?} CMAKE_TOOLCHAIN_FILE=category/core/toolchains/${TOOLCHAIN:?}.cmake ./scripts/configure.sh
 
 RUN cd src && ./scripts/build.sh
 
 # security=insecure for tests which use io_uring
-RUN --security=insecure cd src && if [ "${CMAKE_BUILD_TYPE:?}" != "Debug" ]; then CC=${CC:?} CXX=${CXX:?} CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:?} ./scripts/test.sh; fi
+RUN --security=insecure cd src && CC=${CC:?} CXX=${CXX:?} CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:?} ./scripts/test.sh
 
 FROM base AS build_and_test_vm
 
@@ -53,7 +54,7 @@ ARG CMAKE_BUILD_TYPE
 ARG TOOLCHAIN
 
 RUN cd src && CC=${CC:?} CXX=${CXX:?} CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:?} CMAKE_TOOLCHAIN_FILE=category/core/toolchains/${TOOLCHAIN:?}.cmake ./scripts/configure.sh
-RUN cd src && cmake build -DMONAD_COMPILER_TESTING=On -DMONAD_COMPILER_LLVM=Off
+RUN cd src && cmake build -DMONAD_COMPILER_TESTING=On
 
 RUN cd src && ./scripts/vm/build-tests.sh
 RUN cd src && ./scripts/vm/test.sh
@@ -77,7 +78,6 @@ COPY . src
 
 RUN cd src && CMAKE_TOOLCHAIN_FILE=category/core/toolchains/gcc-avx2.cmake cmake -S . -B build           \
   -DMONAD_COMPILER_BENCHMARKS=On  \
-  -DMONAD_COMPILER_LLVM=Off       \
   -DMONAD_COMPILER_TESTING=On     \
   -DCMAKE_BUILD_TYPE=Debug        \
   -DCMAKE_C_COMPILER=clang-19     \
@@ -120,6 +120,34 @@ RUN cd src/rust && cargo check --all-targets --all-features
 RUN cd src/rust && cargo doc --all-features --no-deps
 RUN cd src/rust && cargo test --release --doc --all-features
 
+FROM base AS base_riscv_gnu_toolchain
+
+COPY scripts/ubuntu-build/ /opt
+RUN apt-get update && \
+    /opt/install-riscv-deps.sh && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Clone, build, install, strip, and remove the build tree in a single layer.
+# Only /root/riscv is consumed downstream; the build tree must be removed in
+# the same RUN it was created or it persists in the layer.
+RUN /opt/build-riscv-toolchain.sh && \
+    rm -rf /opt
+
+ENV PATH="/root/riscv/bin:${PATH}"
+
+WORKDIR /
+
+FROM base_riscv_gnu_toolchain AS build_zk
+
+COPY . src
+
+RUN cd src && cmake -B build-zkvm -S zkvm/guest \
+    -DCMAKE_TOOLCHAIN_FILE=/src/category/core/toolchains/riscv64-elf.cmake \
+    -DRISCV_TOOLCHAIN_DIR=/root/riscv \
+    -DCMAKE_BUILD_TYPE=Release
+RUN cd src && cmake --build build-zkvm --target monad-zkvm --parallel
+
 FROM base AS vm_fuzz
 
 RUN apt-get update && apt-get install -y tmux
@@ -129,7 +157,6 @@ COPY . src
 RUN cd src && CMAKE_TOOLCHAIN_FILE=category/core/toolchains/gcc-avx2.cmake cmake -S . -B build \
   -GNinja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DMONAD_COMPILER_LLVM=Off \
   -DMONAD_COMPILER_TESTING=On \
   -DCMAKE_C_COMPILER=clang-19 \
   -DCMAKE_CXX_COMPILER=clang++-19

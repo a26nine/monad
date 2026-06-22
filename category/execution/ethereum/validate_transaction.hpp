@@ -15,12 +15,14 @@
 
 #pragma once
 
+#include <category/core/address.hpp>
 #include <category/core/config.hpp>
 #include <category/core/int.hpp>
 #include <category/core/result.hpp>
-#include <category/execution/ethereum/core/address.hpp>
+#include <category/execution/ethereum/core/contract/checked_math.hpp>
 #include <category/execution/ethereum/core/transaction.hpp>
 #include <category/execution/ethereum/state3/state.hpp>
+#include <category/execution/ethereum/trace/state_tracer.hpp>
 #include <category/execution/ethereum/transaction_gas.hpp>
 #include <category/execution/ethereum/validate_transaction_error.hpp>
 #include <category/vm/code.hpp>
@@ -31,9 +33,13 @@
 
 #include <boost/outcome/config.hpp>
 #include <boost/outcome/success_failure.hpp>
+#include <boost/outcome/try.hpp>
+
+#include <category/core/likely.h>
 
 #include <initializer_list>
 #include <optional>
+#include <span>
 
 MONAD_NAMESPACE_BEGIN
 
@@ -46,19 +52,37 @@ template <Traits traits>
 Result<void> validate_transaction(
     Transaction const &tx, Address const &sender, State &state,
     uint256_t const &base_fee_per_gas,
-    std::span<std::optional<Address> const> const authorities);
+    std::span<std::optional<Address> const> const authorities,
+    trace::StateTracer &state_tracer);
 
 template <Traits traits>
 [[gnu::always_inline]] inline Result<void> validate_ethereum_transaction(
-    Transaction const &tx, Address const &sender, State &state)
+    Transaction const &tx, Address const &sender, State &state,
+    trace::StateTracer &state_tracer)
 {
     using BOOST_OUTCOME_V2_NAMESPACE::success;
 
-    // YP (70)
-    uint512_t v0 = tx.value + max_gas_cost(tx.gas_limit, tx.max_fee_per_gas);
-    if (tx.type == TransactionType::eip4844) {
-        v0 += tx.max_fee_per_blob_gas * get_total_blob_gas(tx);
+    // YP (70): total cost = value + gas_cost (+ blob_fee).
+    Result<uint256_t> const v0_r = [&]() -> Result<uint256_t> {
+        BOOST_OUTCOME_TRY(
+            uint256_t const gas_fee,
+            max_gas_cost(tx.gas_limit, tx.max_fee_per_gas));
+        BOOST_OUTCOME_TRY(
+            uint256_t const base_cost, checked_add(tx.value, gas_fee));
+        if (tx.type == TransactionType::eip4844) {
+            BOOST_OUTCOME_TRY(
+                uint256_t const blob_cost,
+                checked_mul(
+                    uint256_t{get_total_blob_gas(tx)},
+                    tx.max_fee_per_blob_gas));
+            return checked_add(base_cost, blob_cost);
+        }
+        return base_cost;
+    }();
+    if (MONAD_UNLIKELY(!v0_r)) {
+        return TransactionError::InsufficientBalance;
     }
+    auto const &v0 = v0_r.assume_value();
 
     if (MONAD_UNLIKELY(!state.account_exists(sender))) {
         // YP (71)
@@ -73,10 +97,12 @@ template <Traits traits>
     }
 
     // YP (71)
-    bool sender_is_eoa = state.get_code_hash(sender) == NULL_HASH;
-    if constexpr (traits::evm_rev() >= EVMC_PRAGUE) {
+    auto const code_hash = state.get_code_hash(sender);
+    bool sender_is_eoa = code_hash == NULL_HASH;
+    if constexpr (traits::evm_rev() >= MONAD_ETH_PRAGUE) {
         // EIP-7702
-        auto const icode = state.get_code(sender)->intercode();
+        auto const icode = state.read_code(code_hash)->intercode();
+        trace::on_read_code(state_tracer, code_hash, icode);
         sender_is_eoa = sender_is_eoa ||
                         vm::evm::is_delegated({icode->code(), icode->size()});
     }

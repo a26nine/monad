@@ -62,24 +62,41 @@ namespace detail
     void async_parallel_preorder_traverse_impl(
         TraverseSender &sender,
         async::erased_connected_operation *traverse_state, Node const &node,
-        TraverseMachine &machine, unsigned char const branch);
+        TraverseMachine &machine, unsigned char branch);
+
+    struct DefaultChildrenVisitRange
+    {
+        auto operator()(uint16_t const mask) const
+        {
+            return NodeChildrenRange(mask);
+        }
+    };
 
     // current implementation does not contaminate triedb node caching
+    template <class ChildrenVisitRange>
     inline bool preorder_traverse_blocking_impl(
-        UpdateAuxImpl &aux, unsigned char const branch, Node const &node,
-        TraverseMachine &traverse, uint64_t const version)
+        UpdateAux &aux, unsigned char const branch, Node const &node,
+        TraverseMachine &traverse, uint64_t const version,
+        ChildrenVisitRange &children_of, timeline_id const tid)
     {
         ++traverse.level;
         if (!traverse.down(branch, node)) {
             --traverse.level;
             return true;
         }
-        for (auto const [idx, next_branch] : NodeChildrenRange(node.mask)) {
+        auto const range = children_of(node.mask);
+        for (auto const &[idx, next_branch] : range) {
             if (traverse.should_visit(node, next_branch)) {
                 if (Node::SharedPtr const &next = node.next(idx);
                     next != nullptr) {
                     if (!preorder_traverse_blocking_impl(
-                            aux, next_branch, *next, traverse, version)) {
+                            aux,
+                            next_branch,
+                            *next,
+                            traverse,
+                            version,
+                            children_of,
+                            tid)) {
                         --traverse.level;
                         traverse.up(branch, node);
                         return false;
@@ -88,13 +105,15 @@ namespace detail
                 }
                 MONAD_ASSERT(aux.is_on_disk());
                 auto const next_node_ondisk =
-                    read_node_blocking(aux, node.fnext(idx), version);
+                    read_node_blocking(aux, node.fnext(idx), version, tid);
                 if (!next_node_ondisk || !preorder_traverse_blocking_impl(
                                              aux,
                                              next_branch,
                                              *next_node_ondisk,
                                              traverse,
-                                             version)) {
+                                             version,
+                                             children_of,
+                                             tid)) {
                     --traverse.level;
                     traverse.up(branch, node);
                     return false;
@@ -135,7 +154,7 @@ namespace detail
             unsigned char const branch;
 
             receiver_t(
-                TraverseSender *sender,
+                TraverseSender *const sender,
                 async::erased_connected_operation *const traverse_state,
                 unsigned char const branch, chunk_offset_t const offset,
                 std::unique_ptr<TraverseMachine> machine)
@@ -163,7 +182,8 @@ namespace detail
                 MONAD_ASSERT(buffer_);
                 --sender->outstanding_reads;
                 if (sender->version_expired_before_complete ||
-                    !sender->aux.version_is_valid_ondisk(sender->version)) {
+                    !sender->aux.metadata_ctx().version_is_valid_ondisk(
+                        sender->version, sender->tid)) {
                     // async read failure or stopping initiated
                     sender->version_expired_before_complete = true;
                     sender->reads_to_initiate.clear();
@@ -201,10 +221,11 @@ namespace detail
 
         using result_type = async::result<bool>;
 
-        UpdateAuxImpl &aux;
+        UpdateAux &aux;
         Node::SharedPtr traverse_root;
         std::unique_ptr<TraverseMachine> machine;
         uint64_t const version;
+        timeline_id const tid;
         size_t const max_outstanding_reads;
         size_t outstanding_reads{0};
         size_t within_recursion_count{0};
@@ -215,19 +236,20 @@ namespace detail
         bool version_expired_before_complete{false};
 
         TraverseSender(
-            UpdateAuxImpl &aux, Node::SharedPtr traverse_root,
+            UpdateAux &aux, Node::SharedPtr traverse_root,
             std::unique_ptr<TraverseMachine> machine, uint64_t const version,
-            size_t const concurrency_limit)
+            timeline_id const tid, size_t const concurrency_limit)
             : aux(aux)
             , traverse_root(std::move(traverse_root))
             , machine(std::move(machine))
             , version(version)
+            , tid(tid)
             , max_outstanding_reads(concurrency_limit)
         {
         }
 
         async::result<void>
-        operator()(async::erased_connected_operation *traverse_state)
+        operator()(async::erased_connected_operation *const traverse_state)
         {
             MONAD_ASSERT(traverse_root != nullptr);
             async_parallel_preorder_traverse_init(
@@ -272,7 +294,8 @@ namespace detail
 
     inline void async_parallel_preorder_traverse_init(
         TraverseSender &sender,
-        async::erased_connected_operation *traverse_state, Node const &node)
+        async::erased_connected_operation *const traverse_state,
+        Node const &node)
     {
         sender.within_recursion_count++;
         async_parallel_preorder_traverse_impl(
@@ -289,8 +312,8 @@ namespace detail
 
     inline void async_parallel_preorder_traverse_impl(
         TraverseSender &sender,
-        async::erased_connected_operation *traverse_state, Node const &node,
-        TraverseMachine &machine, unsigned char const branch)
+        async::erased_connected_operation *const traverse_state,
+        Node const &node, TraverseMachine &machine, unsigned char const branch)
     {
         // How many children are considered left side for depth first preference
         // Two and four was benchmarked as slightly worse than three, so three
@@ -313,7 +336,8 @@ namespace detail
                 if (next == nullptr) {
                     MONAD_ASSERT(sender.aux.is_on_disk());
                     // verify version before read
-                    if (!sender.aux.version_is_valid_ondisk(sender.version)) {
+                    if (!sender.aux.metadata_ctx().version_is_valid_ondisk(
+                            sender.version, sender.tid)) {
                         sender.version_expired_before_complete = true;
                         sender.reads_to_initiate.clear();
                         sender.reads_to_initiate_sidx = 0;
@@ -371,19 +395,22 @@ namespace detail
 }
 
 // return value indicates if we have done the full traversal or not
+template <class ChildrenVisitRange = detail::DefaultChildrenVisitRange>
 inline bool preorder_traverse_blocking(
-    UpdateAuxImpl &aux, Node const &node, TraverseMachine &traverse,
-    uint64_t const version)
+    UpdateAux &aux, Node const &node, TraverseMachine &traverse,
+    uint64_t const version, timeline_id const tid = timeline_id::primary,
+    ChildrenVisitRange children_of = {})
 {
     auto const ret = detail::preorder_traverse_blocking_impl(
-        aux, INVALID_BRANCH, node, traverse, version);
+        aux, INVALID_BRANCH, node, traverse, version, children_of, tid);
     MONAD_ASSERT(traverse.level == 0);
     return ret;
 }
 
 inline bool preorder_traverse_ondisk(
-    UpdateAuxImpl &aux, Node::SharedPtr node, TraverseMachine &machine,
-    uint64_t const version, size_t const concurrency_limit = 4096)
+    UpdateAux &aux, Node::SharedPtr node, TraverseMachine &machine,
+    uint64_t const version, timeline_id const tid = timeline_id::primary,
+    size_t const concurrency_limit = 4096)
 {
     MONAD_ASSERT(aux.is_on_disk());
 
@@ -399,8 +426,8 @@ inline bool preorder_traverse_ondisk(
         }
 
         void set_value(
-            async::erased_connected_operation *traverse_state,
-            async::result<bool> traverse_completed)
+            async::erased_connected_operation *const traverse_state,
+            async::result<bool> const traverse_completed)
         {
             MONAD_ASSERT(traverse_completed);
             version_expired_before_traverse_complete_ =
@@ -413,7 +440,12 @@ inline bool preorder_traverse_ondisk(
 
     auto *const state = new auto(async::connect(
         detail::TraverseSender(
-            aux, std::move(node), machine.clone(), version, concurrency_limit),
+            aux,
+            std::move(node),
+            machine.clone(),
+            version,
+            tid,
+            concurrency_limit),
         TraverseReceiver{version_expired_before_traverse_complete}));
     state->initiate();
 

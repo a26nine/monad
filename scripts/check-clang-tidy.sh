@@ -47,13 +47,17 @@ if [ -f $CONST_CORRECTNESS_PLUGIN ]; then
                         -checks='-misc-const-correctness,misc-auto-const-correctness' )
 fi
 
-mapfile -t inputs < <(\
-  find \
+
+# Restrict linting to files that aren't in a .gitignore.
+mapfile -d '' -t inputs < <(\
+    rg --files -0 \
+    -g '*.cpp' -g '*.c' \
     category/async \
     category/core  \
+    category/mpt   \
     category/rpc   \
     category/vm    \
-    \( -name '*.cpp' -or -name '*.c' \))
+    zkvm)
 
 "${RUN_CLANG_TIDY}"                               \
   "${inputs[@]}"                                  \

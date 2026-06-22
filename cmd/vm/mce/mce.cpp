@@ -20,6 +20,8 @@
 #include <instrumentation_device.hpp>
 #include <stopwatch.hpp>
 
+#include <category/core/int.hpp>
+#include <category/core/log.hpp>
 #include <category/core/runtime/uint256.hpp>
 #include <category/vm/compiler/ir/basic_blocks.hpp>
 #include <category/vm/compiler/ir/x86/types.hpp>
@@ -35,8 +37,6 @@
 
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
-
-#include <quill/Quill.h>
 
 #include <algorithm>
 #include <cctype>
@@ -65,7 +65,6 @@ struct arguments
     std::optional<std::string> asm_log_file;
     bool wall_clock_time = false;
     bool report_result = false;
-    bool use_llvm = false;
 };
 
 static arguments parse_args(int const argc, char **const argv)
@@ -114,10 +113,6 @@ static arguments parse_args(int const argc, char **const argv)
         "-u",
         args.timeunit_s,
         std::format("Wall clock time unit (default: {})", args.timeunit_s));
-    app.add_flag(
-        "--llvm",
-        args.use_llvm,
-        std::format("Use llvm backend (default: {})", args.use_llvm));
     try {
         app.parse(argc, argv);
         args.timeunit = timeunit_of_short_string(args.timeunit_s);
@@ -129,7 +124,7 @@ static arguments parse_args(int const argc, char **const argv)
         std::exit(app.exit(e));
     }
 
-    quill::start(true);
+    monad::start_logger_minimal();
 
     return args;
 }
@@ -156,7 +151,7 @@ static void dump_result(arguments const &args, evmc::Result const &result)
             object["result"] = json("");
         }
         else {
-            auto const x = uint256_t::load_be_unsafe(&result.output_data[0]);
+            auto const x = load_be_unsafe<uint256_t>(&result.output_data[0]);
             object["result"] = json(x.to_string(16));
         }
     }
@@ -213,7 +208,7 @@ int mce_main(arguments const &args)
     }();
     if (!ir) {
         LOG_ERROR("Parsing failed.");
-        quill::flush();
+        monad::flush_logger();
         abort();
     }
 
@@ -227,11 +222,11 @@ int mce_main(arguments const &args)
     }
     if (args.instrument_compile) {
         InstrumentableCompiler<true> compiler(rt, config);
-        bin = compiler.compile<traits>(*ir, device, args.use_llvm);
+        bin = compiler.compile<traits>(*ir, device);
     }
     else {
         InstrumentableCompiler<false> compiler(rt, config);
-        bin = compiler.compile<traits>(*ir, device, args.use_llvm);
+        bin = compiler.compile<traits>(*ir, device);
     }
 
     evmc::Result const result = [&]() {
@@ -265,53 +260,32 @@ int main(int argc, char **argv)
     std::ios_base::sync_with_stdio(false);
     auto args = parse_args(argc, argv);
     std::string const rev = uppercase(args.revision);
-    if (rev == "FRONTIER") {
-        return mce_main<EvmTraits<EVMC_FRONTIER>>(args);
-    }
-    else if (rev == "HOMESTEAD") {
-        return mce_main<EvmTraits<EVMC_HOMESTEAD>>(args);
-    }
-    else if (rev == "TANGERINE_WHISTLE") {
-        return mce_main<EvmTraits<EVMC_TANGERINE_WHISTLE>>(args);
-    }
-    else if (rev == "SPURIOUS_DRAGON") {
-        return mce_main<EvmTraits<EVMC_SPURIOUS_DRAGON>>(args);
-    }
-    else if (rev == "BYZANTIUM") {
-        return mce_main<EvmTraits<EVMC_BYZANTIUM>>(args);
-    }
-    else if (rev == "CONSTANTINOPLE") {
-        return mce_main<EvmTraits<EVMC_CONSTANTINOPLE>>(args);
-    }
-    else if (rev == "PETERSBURG") {
-        return mce_main<EvmTraits<EVMC_PETERSBURG>>(args);
-    }
-    else if (rev == "ISTANBUL") {
-        return mce_main<EvmTraits<EVMC_ISTANBUL>>(args);
+    if (rev == "ISTANBUL") {
+        return mce_main<EvmTraits<MONAD_ETH_ISTANBUL>>(args);
     }
     else if (rev == "BERLIN") {
-        return mce_main<EvmTraits<EVMC_BERLIN>>(args);
+        return mce_main<EvmTraits<MONAD_ETH_BERLIN>>(args);
     }
     else if (rev == "LONDON") {
-        return mce_main<EvmTraits<EVMC_LONDON>>(args);
+        return mce_main<EvmTraits<MONAD_ETH_LONDON>>(args);
     }
     else if (rev == "PARIS") {
-        return mce_main<EvmTraits<EVMC_PARIS>>(args);
+        return mce_main<EvmTraits<MONAD_ETH_PARIS>>(args);
     }
     else if (rev == "SHANGHAI") {
-        return mce_main<EvmTraits<EVMC_SHANGHAI>>(args);
+        return mce_main<EvmTraits<MONAD_ETH_SHANGHAI>>(args);
     }
     else if (rev == "CANCUN") {
-        return mce_main<EvmTraits<EVMC_CANCUN>>(args);
+        return mce_main<EvmTraits<MONAD_ETH_CANCUN>>(args);
     }
     else if (rev == "PRAGUE") {
-        return mce_main<EvmTraits<EVMC_PRAGUE>>(args);
+        return mce_main<EvmTraits<MONAD_ETH_PRAGUE>>(args);
     }
     else if (rev == "OSAKA") {
-        return mce_main<EvmTraits<EVMC_OSAKA>>(args);
+        return mce_main<EvmTraits<MONAD_ETH_OSAKA>>(args);
     }
     else if (rev == "LATEST") {
-        return mce_main<EvmTraits<EVMC_LATEST_STABLE_REVISION>>(args);
+        return mce_main<EvmTraits<MONAD_ETH_LATEST_STABLE_REVISION>>(args);
     }
     else {
         LOG_ERROR("unsupported revision '{}'", args.revision);

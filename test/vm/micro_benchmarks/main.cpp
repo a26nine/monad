@@ -13,6 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include "test_state.hpp"
+
+#include <category/core/address.hpp>
+#include <category/core/int.hpp>
+#include <category/vm/evm/revision.h>
 #include <category/vm/utils/evm-as/kernel-builder.hpp>
 
 #include <test/vm/utils/evm-as_utils.hpp>
@@ -33,7 +38,7 @@ using namespace monad::vm;
 using namespace monad::vm::runtime;
 using namespace monad::vm::utils::evm_as;
 
-using traits = EvmTraits<EVMC_OSAKA>;
+using traits = EvmTraits<MONAD_ETH_OSAKA>;
 
 enum class OutputFormat
 {
@@ -316,10 +321,10 @@ print_results(std::vector<BenchmarkResult> const &results, OutputFormat format)
 }
 
 static double execute_iteration(
-    evmc::VM &vm, MemoryPool &memory_pool, evmc::address const &code_address,
+    evmc::VM &vm, MemoryPool &memory_pool, Address const &code_address,
     std::vector<uint8_t> const &bytecode, test::KernelCalldata const &calldata)
 {
-    evmc::address sender_address{200};
+    Address sender_address{200};
 
     evmone::test::TestState test_state{};
     test_state.apply(evmone::state::StateDiff{
@@ -343,7 +348,7 @@ static double execute_iteration(
     evmone::test::TestBlockHashes block_hashes{};
     evmone::state::Transaction transaction{};
     auto host = evmone::state::Host(
-        traits::evm_rev(),
+        to_evmc_revision(traits::evm_rev()),
         vm,
         host_state,
         block_info,
@@ -376,25 +381,24 @@ static double execute_iteration(
     auto result = bvm->execute(
         interface,
         ctx,
-        traits::evm_rev(),
+        to_evmc_revision(traits::evm_rev()),
         &msg,
         bytecode.data(),
         bytecode.size());
 
     auto const stop = std::chrono::steady_clock::now();
 
-    MONAD_VM_ASSERT(result.status_code == EVMC_SUCCESS);
+    MONAD_ASSERT(result.status_code == EVMC_SUCCESS);
 
     return static_cast<double>((stop - start).count());
 }
 
 static std::pair<double, double> execute_against_base(
-    evmc::VM &vm, MemoryPool &memory_pool,
-    evmc::address const &base_code_address,
+    evmc::VM &vm, MemoryPool &memory_pool, Address const &base_code_address,
     std::vector<uint8_t> const &base_bytecode,
-    test::KernelCalldata const &base_calldata,
-    evmc::address const &code_address, std::vector<uint8_t> const &bytecode,
-    test::KernelCalldata const &calldata, size_t iteration_count)
+    test::KernelCalldata const &base_calldata, Address const &code_address,
+    std::vector<uint8_t> const &bytecode, test::KernelCalldata const &calldata,
+    size_t iteration_count)
 {
     for (uint32_t i = 0; i < (iteration_count >> 4) + 1; ++i) {
         // warmup
@@ -463,7 +467,7 @@ static std::optional<BenchmarkResult> run_implementation_benchmark(
         compile(bench.assemble(seq), bytecode);
         auto const calldata = [&] {
             if (auto const &ss = bench.effect_free_subject_seqs) {
-                MONAD_VM_ASSERT(ss->size() == bench.subject_seqs.size());
+                MONAD_ASSERT(ss->size() == bench.subject_seqs.size());
                 return bench.calldata_generate((*ss)[i]);
             }
             else {
@@ -501,9 +505,6 @@ static BlockchainTestVM::Implementation const all_impls[] = {
     Interpreter,
     BlockchainTestVM::Implementation::Compiler,
     Evmone,
-#ifdef MONAD_COMPILER_LLVM
-    LLVM,
-#endif
 };
 
 static void run_benchmark(
@@ -661,7 +662,7 @@ BenchmarkBuilder &BenchmarkBuilder::run_throughput_benchmark()
 {
     using KB = KernelBuilder<traits>;
 
-    MONAD_VM_ASSERT(calldata_.size());
+    MONAD_ASSERT(calldata_.size());
 
     KB base_builder;
     for (size_t i = 1; i < num_inputs_; ++i) {
@@ -703,9 +704,9 @@ BenchmarkBuilder &BenchmarkBuilder::run_latency_benchmark()
 {
     using KB = KernelBuilder<traits>;
 
-    MONAD_VM_ASSERT(calldata_.size());
-    MONAD_VM_ASSERT(has_output_);
-    MONAD_VM_ASSERT(num_inputs_ >= 1);
+    MONAD_ASSERT(calldata_.size());
+    MONAD_ASSERT(has_output_);
+    MONAD_ASSERT(num_inputs_ >= 1);
 
     KB base_builder;
     if (num_inputs_ == 1) {
@@ -780,7 +781,7 @@ int main(int argc, char **argv)
             auto const off = KernelBuilder<traits>::free_memory_start;
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 32) {
-                uint256_t{off}.store_be(&cd[i]);
+                store_be(&cd[i], uint256_t{off});
             }
             return cd;
         })
@@ -800,8 +801,8 @@ int main(int argc, char **argv)
             auto const off = KernelBuilder<traits>::free_memory_start;
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 64) {
-                uint256_t{off + i * 2}.store_be(&cd[i]);
-                uint256_t{off + i * 2}.store_be(&cd[i + 32]);
+                store_be(&cd[i], uint256_t{off + i * 2});
+                store_be(&cd[i + 32], uint256_t{off + i * 2});
             }
             return cd;
         })
@@ -833,7 +834,7 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(4'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 32) {
-                rand_uint256().store_be(&cd[i]);
+                store_be(&cd[i], rand_uint256());
             }
             return cd;
         })
@@ -850,8 +851,8 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(100'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 64) {
-                (rand_uint256() & 31).store_be(&cd[i]);
-                rand_uint256().store_be(&cd[i + 32]);
+                store_be(&cd[i], (rand_uint256() & 31));
+                store_be(&cd[i + 32], rand_uint256());
             }
             return cd;
         })
@@ -869,8 +870,8 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 64) {
-                uint256_t{3}.store_be(&cd[i]);
-                uint256_t{-1, -1, -1, -1}.store_be(&cd[i + 32]);
+                store_be(&cd[i], uint256_t{3});
+                store_be(&cd[i + 32], uint256_t{-1, -1, -1, -1});
             }
             return cd;
         })
@@ -888,8 +889,8 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 64) {
-                uint256_t{3}.store_be(&cd[i]);
-                uint256_t{-1, -1, -1, -1}.store_be(&cd[i + 32]);
+                store_be(&cd[i], uint256_t{3});
+                store_be(&cd[i + 32], uint256_t{-1, -1, -1, -1});
             }
             return cd;
         })
@@ -908,8 +909,8 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 64) {
-                uint256_t{3}.store_be(&cd[i]);
-                uint256_t{-1, -1, -1, -1}.store_be(&cd[i + 32]);
+                store_be(&cd[i], uint256_t{3});
+                store_be(&cd[i + 32], uint256_t{-1, -1, -1, -1});
             }
             return cd;
         })
@@ -927,8 +928,8 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(100'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 64) {
-                (rand_uint256() & 255).store_be(&cd[i]);
-                rand_uint256().store_be(&cd[i + 32]);
+                store_be(&cd[i], (rand_uint256() & 255));
+                store_be(&cd[i + 32], rand_uint256());
             }
             return cd;
         })
@@ -946,8 +947,8 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 64) {
-                uint256_t{129}.store_be(&cd[i]);
-                uint256_t{-1, -1, -1, -1}.store_be(&cd[i + 32]);
+                store_be(&cd[i], uint256_t{129});
+                store_be(&cd[i + 32], uint256_t{-1, -1, -1, -1});
             }
             return cd;
         })
@@ -965,7 +966,7 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 32) {
-                rand_uint256().store_be(&cd[i]);
+                store_be(&cd[i], rand_uint256());
             }
             return cd;
         })
@@ -1025,7 +1026,7 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 32) {
-                uint256_t{77}.store_be(&cd[i]);
+                store_be(&cd[i], uint256_t{77});
             }
             return cd;
         })
@@ -1045,7 +1046,7 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 32) {
-                uint256_t{77}.store_be(&cd[i]);
+                store_be(&cd[i], uint256_t{77});
             }
             return cd;
         })
@@ -1064,7 +1065,7 @@ int main(int argc, char **argv)
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 100 * 32) {
                 for (size_t j = 0; j < 100; ++j) {
-                    uint256_t{j}.store_be(&cd[i + 32 * j]);
+                    store_be(&cd[i + 32 * j], uint256_t{j});
                 }
             }
             return cd;
@@ -1086,7 +1087,7 @@ int main(int argc, char **argv)
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 100 * 32) {
                 for (size_t j = 0; j < 100; ++j) {
-                    uint256_t{j}.store_be(&cd[i + 32 * j]);
+                    store_be(&cd[i + 32 * j], uint256_t{j});
                 }
             }
             return cd;
@@ -1105,7 +1106,7 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 32) {
-                uint256_t{22}.store_be(&cd[i]);
+                store_be(&cd[i], uint256_t{22});
             }
             return cd;
         })
@@ -1125,7 +1126,7 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 32) {
-                uint256_t{22}.store_be(&cd[i]);
+                store_be(&cd[i], uint256_t{22});
             }
             return cd;
         })
@@ -1144,7 +1145,7 @@ int main(int argc, char **argv)
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 30 * 32) {
                 for (size_t j = 0; j < 30; ++j) {
-                    uint256_t{j}.store_be(&cd[i + 32 * j]);
+                    store_be(&cd[i + 32 * j], uint256_t{j});
                 }
             }
             return cd;
@@ -1166,7 +1167,7 @@ int main(int argc, char **argv)
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 30 * 32) {
                 for (size_t j = 0; j < 30; ++j) {
-                    uint256_t{j}.store_be(&cd[i + 32 * j]);
+                    store_be(&cd[i + 32 * j], uint256_t{j});
                 }
             }
             return cd;
@@ -1185,9 +1186,9 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += 96) {
-                uint256_t{0}.store_be(&cd[i]); // value
-                uint256_t{32}.store_be(&cd[i + 32]); // offset
-                uint256_t{32}.store_be(&cd[i + 64]); // size
+                store_be(&cd[i], uint256_t{0}); // value
+                store_be(&cd[i + 32], uint256_t{32}); // offset
+                store_be(&cd[i + 64], uint256_t{32}); // size
             }
             return cd;
         })
@@ -1204,13 +1205,13 @@ int main(int argc, char **argv)
         .make_calldata([](size_t num_inputs) {
             std::vector<uint8_t> cd(10'000 * num_inputs * 32, 0);
             for (size_t i = 0; i < cd.size(); i += num_inputs * 32) {
-                uint256_t{100'000}.store_be(&cd[i]); // gas
-                uint256_t{0}.store_be(&cd[i + 32]); // address
-                uint256_t{0}.store_be(&cd[i + 64]); // value
-                uint256_t{0}.store_be(&cd[i + 96]); // argsOffset
-                uint256_t{64}.store_be(&cd[i + 128]); // argsSize
-                uint256_t{64}.store_be(&cd[i + 160]); // retOffset
-                uint256_t{32}.store_be(&cd[i + 192]); // retSize
+                store_be(&cd[i], uint256_t{100'000}); // gas
+                store_be(&cd[i + 32], uint256_t{0}); // address
+                store_be(&cd[i + 64], uint256_t{0}); // value
+                store_be(&cd[i + 96], uint256_t{0}); // argsOffset
+                store_be(&cd[i + 128], uint256_t{64}); // argsSize
+                store_be(&cd[i + 160], uint256_t{64}); // retOffset
+                store_be(&cd[i + 192], uint256_t{32}); // retSize
             }
             return cd;
         })

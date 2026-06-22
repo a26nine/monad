@@ -15,13 +15,15 @@
 
 #pragma once
 
+#include <category/core/assert.h>
 #include <category/core/is_specialization_of.hpp>
-#include <category/vm/core/assert.h>
 #include <category/vm/evm/monad/revision.h>
+#include <category/vm/evm/revision.h>
 
 #include <evmc/evmc.h>
 
 #include <concepts>
+#include <cstdint>
 #include <limits>
 #include <utility>
 
@@ -29,6 +31,10 @@ namespace monad
 {
     namespace constants
     {
+        inline constexpr monad_eth_revision EARLIEST_SUPPORTED_EVM_FORK =
+            MONAD_ETH_ISTANBUL;
+        inline constexpr uint64_t EARLIEST_SUPPORTED_ETH_BLOCK_NUMBER = 9069000;
+
         inline constexpr size_t MAX_CODE_SIZE_EIP170 = 24 * 1024; // 0x6000
         inline constexpr size_t MAX_INITCODE_SIZE_EIP3860 =
             2 * MAX_CODE_SIZE_EIP170; // 0xC000
@@ -38,19 +44,32 @@ namespace monad
             2 * MAX_CODE_SIZE_MONAD_TWO;
     }
 
+    namespace detail
+    {
+        // Mirrors LLVM's AnalysisKey: a Traits specialization carries one
+        // static member of this type, and the address of that member is its
+        // opaque unique id (see the id() contract on the Traits concept).
+        struct alignas(8) TraitsKey
+        {
+        };
+    }
+
     template <typename T>
     concept Traits = requires() {
         requires sizeof(T) == 1;
-        { T::evm_rev() } -> std::same_as<evmc_revision>;
+        { T::evm_rev() } -> std::same_as<monad_eth_revision>;
 
         // Feature flags
         { T::eip_2565_active() } -> std::same_as<bool>;
         { T::eip_2929_active() } -> std::same_as<bool>;
         { T::eip_4844_active() } -> std::same_as<bool>;
+        { T::eip_7685_active() } -> std::same_as<bool>;
+        { T::eip_7691_active() } -> std::same_as<bool>;
         { T::eip_7823_active() } -> std::same_as<bool>;
         { T::eip_7883_active() } -> std::same_as<bool>;
         { T::eip_7951_active() } -> std::same_as<bool>;
         { T::mip_3_active() } -> std::same_as<bool>;
+        { T::mip_8_active() } -> std::same_as<bool>;
         { T::can_create_inside_delegated() } -> std::same_as<bool>;
 
         // Constants
@@ -66,42 +85,60 @@ namespace monad
         { T::id() } -> std::same_as<uint64_t>;
     };
 
-    template <evmc_revision Rev>
+    template <monad_eth_revision Rev>
     struct EvmTraits
     {
-        static consteval evmc_revision evm_rev() noexcept
+        static_assert(
+            Rev >= MONAD_ETH_ISTANBUL, "EVM revision is not supported");
+
+        static consteval monad_eth_revision evm_rev() noexcept
         {
             return Rev;
         }
 
         static consteval bool eip_2565_active() noexcept
         {
-            return Rev >= EVMC_BERLIN;
+            return Rev >= MONAD_ETH_BERLIN;
         }
 
         static consteval bool eip_2929_active() noexcept
         {
-            return Rev >= EVMC_BERLIN;
+            return Rev >= MONAD_ETH_BERLIN;
         }
 
         static consteval bool eip_4844_active() noexcept
         {
-            return Rev >= EVMC_CANCUN;
+            return Rev >= MONAD_ETH_CANCUN;
+        }
+
+        static consteval bool eip_7685_active() noexcept
+        {
+            return Rev >= MONAD_ETH_PRAGUE;
+        }
+
+        static consteval bool eip_7691_active() noexcept
+        {
+            return Rev >= MONAD_ETH_PRAGUE;
         }
 
         static consteval bool eip_7823_active() noexcept
         {
-            return Rev >= EVMC_OSAKA;
+            return Rev >= MONAD_ETH_OSAKA;
         }
 
         static consteval bool eip_7883_active() noexcept
         {
-            return Rev >= EVMC_OSAKA;
+            return Rev >= MONAD_ETH_OSAKA;
         }
 
         static consteval bool eip_7951_active() noexcept
         {
-            return Rev >= EVMC_OSAKA;
+            return Rev >= MONAD_ETH_OSAKA;
+        }
+
+        static consteval bool mip_8_active() noexcept
+        {
+            return false;
         }
 
         static consteval bool mip_3_active() noexcept
@@ -116,16 +153,12 @@ namespace monad
 
         static consteval size_t max_code_size() noexcept
         {
-            if constexpr (Rev >= EVMC_SPURIOUS_DRAGON) {
-                return constants::MAX_CODE_SIZE_EIP170;
-            }
-
-            return std::numeric_limits<size_t>::max();
+            return constants::MAX_CODE_SIZE_EIP170;
         }
 
         static consteval size_t max_initcode_size() noexcept
         {
-            if constexpr (Rev >= EVMC_SHANGHAI) {
+            if constexpr (Rev >= MONAD_ETH_SHANGHAI) {
                 return constants::MAX_INITCODE_SIZE_EIP3860;
             }
 
@@ -150,25 +183,31 @@ namespace monad
             std::unreachable();
         }
 
-        static consteval uint64_t id() noexcept
+        static uint64_t id() noexcept
         {
-            return static_cast<uint64_t>(Rev);
+            static_assert(sizeof(uintptr_t) <= sizeof(uint64_t));
+            return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&key));
         }
+
+        static detail::TraitsKey key;
     };
+
+    template <monad_eth_revision Rev>
+    detail::TraitsKey EvmTraits<Rev>::key;
 
     template <monad_revision Rev>
     struct MonadTraits
     {
-        static consteval evmc_revision evm_rev() noexcept
+        static consteval monad_eth_revision evm_rev() noexcept
         {
             if constexpr (Rev >= MONAD_NINE) {
-                return EVMC_OSAKA;
+                return MONAD_ETH_OSAKA;
             }
             if constexpr (Rev >= MONAD_FOUR) {
-                return EVMC_PRAGUE;
+                return MONAD_ETH_PRAGUE;
             }
 
-            return EVMC_CANCUN;
+            return MONAD_ETH_CANCUN;
         }
 
         static consteval monad_revision monad_rev() noexcept
@@ -178,12 +217,12 @@ namespace monad
 
         static consteval bool eip_2565_active() noexcept
         {
-            return evm_rev() >= EVMC_BERLIN;
+            return evm_rev() >= MONAD_ETH_BERLIN;
         }
 
         static consteval bool eip_2929_active() noexcept
         {
-            return evm_rev() >= EVMC_BERLIN;
+            return evm_rev() >= MONAD_ETH_BERLIN;
         }
 
         static consteval bool eip_4844_active() noexcept
@@ -194,14 +233,28 @@ namespace monad
             return false;
         }
 
+        static consteval bool eip_7685_active() noexcept
+        {
+            // Monad Prague blocks carry a requests_hash header field, but
+            // monad-bft currently proposes and validates it as zero rather
+            // than as an Ethereum EIP-7685 request-list hash. Keep those
+            // paths paired before enabling real request hash processing.
+            return false;
+        }
+
+        static consteval bool eip_7691_active() noexcept
+        {
+            return false;
+        }
+
         static consteval bool eip_7823_active() noexcept
         {
-            return evm_rev() >= EVMC_OSAKA;
+            return evm_rev() >= MONAD_ETH_OSAKA;
         }
 
         static consteval bool eip_7883_active() noexcept
         {
-            return evm_rev() >= EVMC_OSAKA;
+            return evm_rev() >= MONAD_ETH_OSAKA;
         }
 
         static consteval bool eip_7951_active() noexcept
@@ -222,6 +275,11 @@ namespace monad
             return false;
         }
 
+        static consteval bool mip_8_active() noexcept
+        {
+            return Rev >= MONAD_NEXT;
+        }
+
         // Pricing version 1 activates the changes in:
         // Monad specification §4: Opcode Gas Costs and Gas Refunds
         static consteval uint8_t monad_pricing_version() noexcept
@@ -231,6 +289,26 @@ namespace monad
             }
 
             return 0;
+        }
+
+        static consteval int64_t base_sload_cost() noexcept
+        {
+            return 100;
+        }
+
+        static consteval int64_t base_sstore_cost() noexcept
+        {
+            return 100;
+        }
+
+        static consteval int64_t page_write_cost() noexcept
+        {
+            return 2800;
+        }
+
+        static consteval int64_t page_growth_cost() noexcept
+        {
+            return 17000;
         }
 
         static consteval size_t max_code_size() noexcept
@@ -275,16 +353,22 @@ namespace monad
             std::unreachable();
         }
 
-        static consteval uint64_t id() noexcept
+        static uint64_t id() noexcept
         {
-            return static_cast<uint64_t>(Rev);
+            static_assert(sizeof(uintptr_t) <= sizeof(uint64_t));
+            return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&key));
         }
+
+        static detail::TraitsKey key;
 
         // Temporary workaround that should be considered equivalent to calling
         // evm_rev(); remove when the refactoring to use feature flags is
         // complete.
         using evm_base = EvmTraits<MonadTraits::evm_rev()>;
     };
+
+    template <monad_revision Rev>
+    detail::TraitsKey MonadTraits<Rev>::key;
 
     template <typename T>
     inline constexpr bool is_evm_trait_v = is_specialization_of_v<EvmTraits, T>;
@@ -294,7 +378,7 @@ namespace monad
         is_specialization_of_v<MonadTraits, T>;
 
     static_assert(is_monad_trait_v<MonadTraits<MONAD_ZERO>> == true);
-    static_assert(is_monad_trait_v<EvmTraits<EVMC_FRONTIER>> == false);
+    static_assert(is_monad_trait_v<EvmTraits<MONAD_ETH_ISTANBUL>> == false);
     static_assert(is_evm_trait_v<MonadTraits<MONAD_ZERO>> == false);
-    static_assert(is_evm_trait_v<EvmTraits<EVMC_FRONTIER>> == true);
+    static_assert(is_evm_trait_v<EvmTraits<MONAD_ETH_ISTANBUL>> == true);
 }

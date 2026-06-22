@@ -22,10 +22,9 @@
 #include <category/core/likely.h>
 #include <category/execution/ethereum/core/account.hpp>
 #include <category/execution/ethereum/state3/account_substate.hpp>
+#include <category/execution/ethereum/state3/page_tracker.hpp>
 
 #include <evmc/evmc.h>
-
-#include <intx/intx.hpp>
 
 // TODO immer known to trigger incorrect warning
 #pragma GCC diagnostic push
@@ -70,6 +69,7 @@ private:
 public:
     StorageMap storage_{};
     StorageMap transient_storage_{};
+    PageTracker page_tracker_{};
 
     evmc_storage_status zero_out_key(
         bytes32_t const &key, bytes32_t const &original_value,
@@ -155,7 +155,7 @@ public:
     }
 };
 
-static_assert(sizeof(AccountState) == 144);
+static_assert(sizeof(AccountState) == 160);
 
 // RELAXED MERGE
 // track the min original balance needed at start of transaction and if the

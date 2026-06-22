@@ -15,8 +15,6 @@
 
 #pragma once
 
-#include <memory>
-
 #include <category/async/concepts.hpp>
 #include <category/async/config.hpp>
 #include <category/async/io.hpp>
@@ -34,6 +32,9 @@
 #include <category/mpt/trie.hpp>
 #include <category/mpt/update.hpp>
 
+#include <memory>
+#include <optional>
+
 MONAD_MPT_NAMESPACE_BEGIN
 
 struct OnDiskDbConfig;
@@ -41,6 +42,11 @@ struct ReadOnlyOnDiskDbConfig;
 struct StateMachine;
 struct TraverseMachine;
 struct AsyncContext;
+
+namespace test
+{
+    struct DbAccessor;
+}
 
 struct AsyncIOContext
 {
@@ -79,7 +85,10 @@ public:
         size_t concurrency_limit = 4096);
 };
 
-// RW, ROBlocking, InMemory
+// A Db is bound to one timeline. The constructors below produce a primary
+// Db; a secondary Db is obtained from activate_secondary_timeline /
+// open_secondary_timeline. Both instances share the underlying UpdateAux
+// and worker thread via the on-disk service thread held inside the Impl.
 class Db
 {
 private:
@@ -92,20 +101,29 @@ private:
 
     std::unique_ptr<Impl> impl_;
 
+    explicit Db(std::unique_ptr<Impl> impl);
+
 public:
-    explicit Db(StateMachine &); // In-memory mode
-    Db(StateMachine &, OnDiskDbConfig const &);
-    explicit Db(AsyncIOContext &);
+    explicit Db(std::unique_ptr<StateMachine>); // in-memory
+    Db(std::unique_ptr<StateMachine>, OnDiskDbConfig const &); // on-disk RW
+    // Production on-disk RW: reads the primary timeline's state_machine_kind
+    // from db_metadata (routed via primary_ring_idx, so it follows the role
+    // label across promote, not a fixed physical ring), constructs the
+    // StateMachine via the registry in category/mpt/state_machine_kind.hpp,
+    // and owns the SM internally. Caller must have registered the relevant
+    // kinds at process start (e.g. monad::register_ethereum_state_machines()).
+    explicit Db(OnDiskDbConfig const &);
+    explicit Db(AsyncIOContext &); // on-disk RO blocking
 
     Db(Db const &) = delete;
-    Db(Db &&) = delete;
+    Db(Db &&) noexcept;
     Db &operator=(Db const &) = delete;
-    Db &operator=(Db &&) = delete;
+    Db &operator=(Db &&) noexcept;
     ~Db();
 
-    // The `block_id` parameter specify the version to read from, and is also
-    // used for version control validation. These calls may wait on a fiber
-    // future.
+    // `block_id` is both the version to read and the validity check.
+    // These calls may block on a fiber future and read from this Db's
+    // bound timeline.
     Result<NodeCursor>
     find(NodeCursor const &, NibblesView, uint64_t block_id) const;
     Result<NodeCursor> find(NibblesView prefix, uint64_t block_id) const;
@@ -146,6 +164,26 @@ public:
     // Blocking traverse never wait on a fiber future.
     bool
     traverse_blocking(NodeCursor const &, TraverseMachine &, uint64_t block_id);
+
+    // Variant that lets the caller supply a `children_of(mask) -> range`
+    // factory controlling the order in which a node's children are visited.
+    // The factory is invoked once per node; its returned range must own its
+    // storage so the recursive descent below cannot clobber it.
+    template <class ChildrenVisitRange>
+    bool traverse_blocking(
+        NodeCursor const &cursor, TraverseMachine &machine,
+        uint64_t const block_id, ChildrenVisitRange children_of)
+    {
+        MONAD_ASSERT(cursor.is_valid());
+        return preorder_traverse_blocking(
+            aux(),
+            *cursor.node,
+            machine,
+            block_id,
+            tid(),
+            std::move(children_of));
+    }
+
     uint64_t get_latest_version() const;
     uint64_t get_earliest_version() const;
     uint64_t get_history_length() const;
@@ -161,6 +199,51 @@ public:
 
     bool is_on_disk() const;
     bool is_read_only() const;
+
+    // Timeline lifecycle (callable on the primary Db only).
+    //
+    // All three require the secondary Db (if one was issued) to be
+    // destroyed first; that invariant is asserted via the worker
+    // thread's shared_ptr refcount.
+
+    // Activate the secondary ring and return a Db bound to it. The
+    // secondary timeline starts empty; its compaction state and version
+    // bounds are seeded by the first secondary upsert.
+    [[nodiscard]] Db activate_secondary_timeline(
+        std::unique_ptr<StateMachine> secondary_machine);
+
+    // Attach to a secondary ring that was activated in a prior process
+    // and persisted on disk. Returns nullopt if no secondary is active.
+    [[nodiscard]] std::optional<Db>
+    open_secondary_timeline(std::unique_ptr<StateMachine> secondary_machine);
+
+    // Production variant: read the secondary timeline's persisted
+    // state_machine_kind from db_metadata (routed via primary_ring_idx ^ 1,
+    // so it tracks the secondary role across promote, not a fixed physical
+    // ring) and construct the StateMachine via the registry. Returns nullopt
+    // if no secondary is active. Stamping the kind is the operator's job
+    // (monad-mpt --activate-secondary --state-machine <kind>).
+    [[nodiscard]] std::optional<Db> open_secondary_timeline();
+
+    // Swap primary and secondary slots. Clears the primary Db's
+    // StateMachine binding so a missed close+reopen (the expected next
+    // step) traps on the next upsert instead of silently using the old
+    // machine on the promoted trie.
+    void promote_secondary_to_primary();
+
+    void deactivate_secondary_timeline();
+
+    bool timeline_active(timeline_id tid) const;
+
+    // The timeline this Db is bound to (primary for ctor-constructed
+    // and in-memory Dbs; secondary for Dbs returned by the activate /
+    // open_secondary_timeline factories).
+    timeline_id tid() const;
+
+private:
+    friend struct test::DbAccessor;
+    UpdateAux const &aux() const;
+    UpdateAux &aux();
 };
 
 // The following are not threadsafe. Please use async get from the RODb owning
@@ -225,7 +308,7 @@ namespace detail
         }
 
         constexpr DbGetSender(
-            AsyncContext &context_, op_t const op_type_, NodeCursor cur_,
+            AsyncContext &context_, op_t const op_type_, NodeCursor const cur_,
             NibblesView const n, uint64_t const block_id_)
             : context(context_)
             , op_type(op_type_)
@@ -239,7 +322,7 @@ namespace detail
         }
 
         async::result<void>
-        operator()(async::erased_connected_operation *io_state) noexcept;
+        operator()(async::erased_connected_operation *io_state);
 
         result_type completed(
             async::erased_connected_operation *,
@@ -250,7 +333,8 @@ namespace detail
 inline detail::TraverseSender make_traverse_sender(
     AsyncContext *const context, Node::SharedPtr traverse_root,
     std::unique_ptr<TraverseMachine> machine, uint64_t const block_id,
-    size_t const concurrency_limit = 4096)
+    size_t const concurrency_limit = 4096,
+    timeline_id const tid = timeline_id::primary)
 {
     MONAD_ASSERT(context);
     return {
@@ -258,6 +342,7 @@ inline detail::TraverseSender make_traverse_sender(
         std::move(traverse_root),
         std::move(machine),
         block_id,
+        tid,
         concurrency_limit};
 }
 

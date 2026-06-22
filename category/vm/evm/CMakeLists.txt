@@ -23,6 +23,8 @@ target_sources(monad-vm-evm PRIVATE
     "explicit_traits.hpp"
     "opcodes.hpp"
     "opcodes_xmacro.hpp"
+    "revision.cpp"
+    "revision.h"
     "switch_traits.hpp"
     "traits.hpp"
 
@@ -36,7 +38,7 @@ target_include_directories(monad-vm-evm
 
 target_link_libraries(monad-vm-evm
     PUBLIC evmc::evmc
-    PUBLIC monad-vm::monad-vm-core
+    PUBLIC monad_core
 )
 
 monad_compile_options(monad-vm-evm)

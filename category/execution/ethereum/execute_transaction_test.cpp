@@ -15,12 +15,14 @@
 
 #include <category/core/hex.hpp>
 #include <category/core/int.hpp>
+#include <category/core/runtime/uint256.hpp>
 #include <category/execution/ethereum/block_hash_buffer.hpp>
+#include <category/execution/ethereum/chain/chain.hpp>
 #include <category/execution/ethereum/chain/ethereum_mainnet.hpp>
 #include <category/execution/ethereum/core/block.hpp>
 #include <category/execution/ethereum/core/transaction.hpp>
 #include <category/execution/ethereum/db/trie_db.hpp>
-#include <category/execution/ethereum/evmc_host.hpp>
+#include <category/execution/ethereum/db/util.hpp>
 #include <category/execution/ethereum/execute_transaction.hpp>
 #include <category/execution/ethereum/metrics/block_metrics.hpp>
 #include <category/execution/ethereum/state2/block_state.hpp>
@@ -31,19 +33,21 @@
 #include <category/execution/ethereum/validate_transaction.hpp>
 #include <category/execution/monad/chain/monad_devnet.hpp>
 #include <category/execution/monad/chain/monad_testnet.hpp>
+#include <category/vm/evm/monad/revision.h>
+#include <category/vm/vm.hpp>
 #include <monad/test/traits_test.hpp>
 
 #include <evmc/evmc.h>
 #include <evmc/evmc.hpp>
 
-#include <intx/intx.hpp>
-
 #include <boost/fiber/future/promise.hpp>
 
 #include <gtest/gtest.h>
 
-#include <memory>
+#include <cstdint>
+#include <limits>
 #include <optional>
+#include <variant>
 
 using namespace monad;
 
@@ -51,7 +55,7 @@ using db_t = TrieDb;
 
 TYPED_TEST(TraitsTest, irrevocable_gas_and_refund_new_contract)
 {
-    using intx::operator""_u256;
+    static_assert(TestFixture::Trait::evm_rev() >= MONAD_ETH_HOMESTEAD);
 
     static constexpr auto from{
         0xf8636377b7a998b51a3cf2bd711b870b3ab0ad56_address};
@@ -59,19 +63,11 @@ TYPED_TEST(TraitsTest, irrevocable_gas_and_refund_new_contract)
         0x5353535353535353535353535353535353535353_address};
 
     static constexpr auto initial_balance = 56'000'000'000'000'000;
-    static constexpr auto actual_gas_cost = [] {
-        if constexpr (TestFixture::Trait::evm_rev() == EVMC_FRONTIER) {
-            return 21'000;
-        }
-        else {
-            return 53'000;
-        }
-    }();
+    static constexpr auto actual_gas_cost = 53'000;
     static constexpr auto gas_limit = actual_gas_cost + 2'000;
     static constexpr auto max_fee_per_gas = 10;
 
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     db_t tdb{db};
     vm::VM vm;
     BlockState bs{tdb, vm};
@@ -95,7 +91,9 @@ TYPED_TEST(TraitsTest, irrevocable_gas_and_refund_new_contract)
         .gas_limit = gas_limit,
     };
 
-    BlockHeader const header{.beneficiary = bene};
+    BlockHeader const header{
+        .number = constants::EARLIEST_SUPPORTED_ETH_BLOCK_NUMBER,
+        .beneficiary = bene};
     BlockHashBufferFinalized const block_hash_buffer;
 
     boost::fibers::promise<void> prev{};
@@ -167,15 +165,13 @@ TYPED_TEST(TraitsTest, irrevocable_gas_and_refund_new_contract)
 
 TYPED_TEST(TraitsTest, TopLevelCreate)
 {
-    using intx::operator""_u256;
 
     static constexpr auto from{
         0xf8636377b7a998b51a3cf2bd711b870b3ab0ad56_address};
     static constexpr auto bene{
         0x5353535353535353535353535353535353535353_address};
 
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     db_t tdb{db};
     vm::VM vm;
     BlockState bs{tdb, vm};
@@ -241,7 +237,7 @@ TYPED_TEST(TraitsTest, TopLevelCreate)
         }
     }
     else {
-        if constexpr (TestFixture::Trait::evm_rev() >= EVMC_SHANGHAI) {
+        if constexpr (TestFixture::Trait::evm_rev() >= MONAD_ETH_SHANGHAI) {
             ASSERT_TRUE(receipt.has_error());
         }
         else {
@@ -252,7 +248,7 @@ TYPED_TEST(TraitsTest, TopLevelCreate)
 
 TYPED_TEST(TraitsTest, refunds_delete)
 {
-    using intx::operator""_u256;
+    static_assert(TestFixture::Trait::evm_rev() >= MONAD_ETH_ISTANBUL);
 
     static constexpr auto from{
         0xf8636377b7a998b51a3cf2bd711b870b3ab0ad56_address};
@@ -274,10 +270,7 @@ TYPED_TEST(TraitsTest, refunds_delete)
             }
         }
 
-        if constexpr (TestFixture::Trait::evm_rev() < EVMC_ISTANBUL) {
-            return 41'092;
-        }
-        else if constexpr (TestFixture::Trait::evm_rev() == EVMC_ISTANBUL) {
+        if constexpr (TestFixture::Trait::evm_rev() == MONAD_ETH_ISTANBUL) {
             // Gas decreased due to calldata cost reduction in EIP-2028
             // where gas per non-zero byte was reduced from 68 to 16
             return 41'040;
@@ -300,7 +293,7 @@ TYPED_TEST(TraitsTest, refunds_delete)
 
     // X -> X -> 0
     static constexpr auto storage_refund_tx2_evm_uncapped = [] {
-        if constexpr (TestFixture::Trait::evm_rev() >= EVMC_LONDON) {
+        if constexpr (TestFixture::Trait::evm_rev() >= MONAD_ETH_LONDON) {
             return 4'800;
         }
         else {
@@ -313,7 +306,7 @@ TYPED_TEST(TraitsTest, refunds_delete)
                 return 0;
             }
         }
-        if constexpr (TestFixture::Trait::evm_rev() >= EVMC_LONDON) {
+        if constexpr (TestFixture::Trait::evm_rev() >= MONAD_ETH_LONDON) {
             // due to EIP-3529 introduced in London revision
             return std::min(
                 gas_charged_tx2 / 5, storage_refund_tx2_evm_uncapped);
@@ -324,8 +317,7 @@ TYPED_TEST(TraitsTest, refunds_delete)
         }
     }();
 
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     db_t tdb{db};
     vm::VM vm;
     BlockState bs{tdb, vm};
@@ -469,7 +461,7 @@ TYPED_TEST(TraitsTest, refunds_delete)
 
 TYPED_TEST(TraitsTest, refunds_delete_then_set)
 {
-    using intx::operator""_u256;
+    static_assert(TestFixture::Trait::evm_rev() >= MONAD_ETH_ISTANBUL);
 
     static constexpr auto from{
         0xf8636377b7a998b51a3cf2bd711b870b3ab0ad56_address};
@@ -482,10 +474,9 @@ TYPED_TEST(TraitsTest, refunds_delete_then_set)
     static constexpr auto max_fee_per_gas = 100'000'000'000;
 
     static constexpr auto slot = bytes32_t{};
-    auto const initial_value = intx::be::store<bytes32_t>(uint256_t{1});
+    auto const initial_value = store_be_as<bytes32_t>(uint256_t{1});
 
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     db_t tdb{db};
     vm::VM vm;
     BlockState bs{tdb, vm};
@@ -573,36 +564,19 @@ TYPED_TEST(TraitsTest, refunds_delete_then_set)
                 }
 
                 if constexpr (
-                    TestFixture::Trait::evm_rev() == EVMC_CONSTANTINOPLE) {
-                    return 26'212;
-                }
-
-                if constexpr (TestFixture::Trait::evm_rev() == EVMC_ISTANBUL) {
+                    TestFixture::Trait::evm_rev() == MONAD_ETH_ISTANBUL) {
                     return 26'812;
                 }
 
-                if constexpr (TestFixture::Trait::evm_rev() < EVMC_ISTANBUL) {
-                    return 46'012;
-                }
-                else {
-                    return 26'112;
-                }
+                return 26'112;
             }();
 
             static constexpr auto storage_refund_evm_uncapped = [] {
                 if constexpr (
-                    TestFixture::Trait::evm_rev() == EVMC_CONSTANTINOPLE) {
-                    return 4800;
-                }
-                if constexpr (TestFixture::Trait::evm_rev() == EVMC_ISTANBUL) {
+                    TestFixture::Trait::evm_rev() == MONAD_ETH_ISTANBUL) {
                     return 4200;
                 }
-                if constexpr (TestFixture::Trait::evm_rev() < EVMC_ISTANBUL) {
-                    return 15000;
-                }
-                else {
-                    return 2800;
-                }
+                return 2800;
             }();
             static constexpr auto storage_refund = [=] {
                 if constexpr (TestFixture::is_monad_trait()) {
@@ -611,7 +585,8 @@ TYPED_TEST(TraitsTest, refunds_delete_then_set)
                         return 0;
                     }
                 }
-                if constexpr (TestFixture::Trait::evm_rev() >= EVMC_LONDON) {
+                if constexpr (
+                    TestFixture::Trait::evm_rev() >= MONAD_ETH_LONDON) {
                     // due to EIP-3529 introduced in London revision
                     return std::min(
                         gas_charged / 5, storage_refund_evm_uncapped);
@@ -633,8 +608,8 @@ TYPED_TEST(TraitsTest, refunds_delete_then_set)
 
 TYPED_TEST(TraitsTest, static_validate_transaction_failure)
 {
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    static_assert(TestFixture::Trait::evm_rev() >= MONAD_ETH_SPURIOUS_DRAGON);
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     db_t tdb{db};
     vm::VM vm;
     BlockState bs{tdb, vm};
@@ -674,10 +649,5 @@ TYPED_TEST(TraitsTest, static_validate_transaction_failure)
 
     ASSERT_TRUE(receipt.has_error());
 
-    if constexpr (TestFixture::Trait::evm_rev() < EVMC_SPURIOUS_DRAGON) {
-        ASSERT_EQ(receipt.error(), TransactionError::TypeNotSupported);
-    }
-    else {
-        ASSERT_EQ(receipt.error(), TransactionError::WrongChainId);
-    }
+    ASSERT_EQ(receipt.error(), TransactionError::WrongChainId);
 }

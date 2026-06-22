@@ -20,8 +20,8 @@
 #include <category/core/likely.h>
 #include <category/core/result.hpp>
 #include <category/core/rlp/config.hpp>
+#include <category/core/rlp/decode_error.hpp>
 #include <category/execution/ethereum/rlp/decode.hpp>
-#include <category/execution/ethereum/rlp/decode_error.hpp>
 #include <category/execution/ethereum/rlp/encode2.hpp>
 
 MONAD_RLP_NAMESPACE_BEGIN
@@ -47,6 +47,12 @@ inline Result<bytes32_t> decode_bytes32_compact(byte_string_view &enc)
     BOOST_OUTCOME_TRY(auto const byte_array, decode_string(enc));
     if (MONAD_UNLIKELY(byte_array.size() > sizeof(bytes32_t))) {
         return DecodeError::InputTooLong;
+    }
+    // encode_bytes32_compact strips all leading zeros, so a payload with a
+    // leading zero byte cannot round-trip and is non-canonical. The empty
+    // payload (value zero) is canonical.
+    if (MONAD_UNLIKELY(!byte_array.empty() && byte_array[0] == 0x00)) {
+        return DecodeError::NonCanonical;
     }
     return to_bytes(byte_array);
 }

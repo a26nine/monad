@@ -17,7 +17,7 @@
 
 #include <category/async/util.hpp>
 
-#include <category/async/detail/start_lifetime_as_polyfill.hpp>
+#include <category/core/detail/start_lifetime_as_polyfill.hpp>
 
 #include <atomic>
 #include <filesystem>
@@ -119,8 +119,8 @@ public:
             }
 
             // Only used for seq chunks
-            std::span<std::atomic<uint32_t>>
-            chunk_bytes_used(file_offset_t end_of_this_offset) const noexcept
+            std::span<std::atomic<uint32_t>> chunk_bytes_used(
+                file_offset_t const end_of_this_offset) const noexcept
             {
                 static_assert(
                     sizeof(uint32_t) == sizeof(std::atomic<uint32_t>));
@@ -135,7 +135,8 @@ public:
             }
 
             // Bytes used by the pool metadata on this device
-            size_t total_size(file_offset_t end_of_this_offset) const noexcept
+            size_t
+            total_size(file_offset_t const end_of_this_offset) const noexcept
             {
                 auto const count = chunks(end_of_this_offset);
                 return sizeof(metadata_t) + count * sizeof(uint32_t);
@@ -145,8 +146,9 @@ public:
         static_assert(sizeof(metadata_t) == 64);
 
         constexpr device_t(
-            int readwritefd, type_t_ type, uint64_t unique_hash,
-            file_offset_t size_of_file, metadata_t *metadata)
+            int const readwritefd, type_t_ const type,
+            uint64_t const unique_hash, file_offset_t const size_of_file,
+            metadata_t *const metadata)
             : readwritefd_(readwritefd)
             , type_(type)
             , unique_hash_(unique_hash)
@@ -206,10 +208,11 @@ public:
 
     public:
         constexpr chunk_t(
-            device_t &device, int read_fd, int write_fd, file_offset_t offset,
-            file_offset_t capacity, uint32_t chunkid_within_device,
-            uint32_t chunkid_within_zone, bool owns_readfd, bool owns_writefd,
-            bool append_only)
+            device_t &device, int const read_fd, int const write_fd,
+            file_offset_t const offset, file_offset_t const capacity,
+            uint32_t const chunkid_within_device,
+            uint32_t const chunkid_within_zone, bool const owns_readfd,
+            bool const owns_writefd, bool const append_only)
             : device_(device)
             , read_fd_(read_fd)
             , write_fd_(write_fd)
@@ -324,6 +327,11 @@ public:
         //! can cause pool data loss, as well as system data loss as it will
         //! happily use any partition you feed it, including the system drive.
         uint32_t disable_mismatching_storage_pool_check : 1;
+        //! Whether to permit on-disk format migration on open. Default false;
+        //! only monad-mpt --upgrade sets this to true. When false, a
+        //! DbMetadataContext ctor that observes PREVIOUS_MAGIC aborts with a
+        //! message directing the operator to run monad-mpt --upgrade.
+        uint32_t allow_migration : 1;
 
         //! Number of conventional chunks to allocate per device. Default is 3.
         uint32_t num_cnv_chunks;
@@ -334,13 +342,15 @@ public:
             , open_read_only(false)
             , open_read_only_allow_dirty(false)
             , disable_mismatching_storage_pool_check(false)
+            , allow_migration(false)
             , num_cnv_chunks(3)
         {
         }
     };
 
 private:
-    bool const is_read_only_, is_read_only_allow_dirty_, is_newly_truncated_;
+    bool const is_read_only_, is_read_only_allow_dirty_, is_migration_allowed_,
+        is_newly_truncated_;
     std::vector<device_t> devices_;
 
     // Lock protects everything below this
@@ -392,6 +402,15 @@ public:
         return is_read_only_allow_dirty_;
     }
 
+    //! \brief True if the storage pool was opened with allow_migration set.
+    //! Consulted by DbMetadataContext to decide whether a PREVIOUS_MAGIC
+    //! pool should be migrated or rejected with a "run monad-mpt --upgrade"
+    //! message.
+    bool is_migration_allowed() const noexcept
+    {
+        return is_migration_allowed_;
+    }
+
     //! \brief True if the storage pool was just truncated, and structures may
     //! need reinitialising
     bool is_newly_truncated() const noexcept
@@ -406,7 +425,7 @@ public:
     }
 
     //! \brief Returns the number of chunks for the specified type
-    size_t chunks(chunk_type which) const noexcept
+    size_t chunks(chunk_type const which) const noexcept
     {
         return chunks_[which].size();
     }

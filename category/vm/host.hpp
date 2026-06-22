@@ -30,6 +30,16 @@ namespace monad::vm
         friend class VM;
 
     public:
+        struct PageStorageStatus
+        {
+            bool first_page_write;
+            bool grew_state;
+        };
+
+        virtual PageStorageStatus update_page(
+            evmc::address const &, evmc::bytes32 const &,
+            evmc_storage_status) noexcept = 0;
+
         /// Capture `std::current_exception()`.
         /// IMPORTANT: Make sure to call this from inside a `catch` block.
         void capture_current_exception() const noexcept
@@ -46,7 +56,7 @@ namespace monad::vm
         /// no stack objects with uninvoked destructor.
         [[noreturn]] void stack_unwind() const
         {
-            MONAD_VM_ASSERT(active_exception_);
+            MONAD_ASSERT(active_exception_);
             // rethrow exceptions when running outside of vm execution context
             // (i.e. when runtime_context_ is unset)
             if (runtime_context_ == nullptr) {
@@ -62,7 +72,7 @@ namespace monad::vm
         [[gnu::always_inline]]
         void rethrow_on_active_exception()
         {
-            if (MONAD_VM_UNLIKELY(active_exception_)) {
+            if (MONAD_UNLIKELY(active_exception_)) {
                 auto e = active_exception_;
                 active_exception_ = std::exception_ptr{};
                 std::rethrow_exception(std::move(e));
@@ -70,7 +80,8 @@ namespace monad::vm
         }
 
         [[gnu::always_inline]]
-        runtime::Context *set_runtime_context(runtime::Context *ctx) noexcept
+        runtime::Context *
+        set_runtime_context(runtime::Context *const ctx) noexcept
         {
             auto *const prev = runtime_context_;
             runtime_context_ = ctx;

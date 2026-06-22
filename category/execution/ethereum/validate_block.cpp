@@ -25,7 +25,6 @@
 #include <category/execution/ethereum/core/receipt.hpp>
 #include <category/execution/ethereum/core/rlp/block_rlp.hpp>
 #include <category/execution/ethereum/core/transaction.hpp>
-#include <category/execution/ethereum/dao.hpp>
 #include <category/execution/ethereum/transaction_gas.hpp>
 #include <category/execution/ethereum/validate_block.hpp>
 #include <category/vm/evm/explicit_traits.hpp>
@@ -77,20 +76,7 @@ bytes32_t compute_ommers_hash(std::vector<BlockHeader> const &ommers)
 template <Traits traits>
 Result<void> static_validate_header(BlockHeader const &header)
 {
-    // There's a subtle way in which this introduces a bug that doesn't really
-    // matter - if for some reason we were trying to run non-mainnet Ethereum
-    // blocks with Homestead block numbers, this check would incorrectly get
-    // fired. However this, check will soon be removed once we drop support for
-    // EVMC_HOMESTEAD
-    if constexpr (is_evm_trait_v<traits>) {
-        // EIP-779
-        if (MONAD_UNLIKELY(
-                header.number >= dao::dao_block_number &&
-                header.number <= dao::dao_block_number + 9 &&
-                header.extra_data != dao::extra_data)) {
-            return BlockError::WrongDaoExtraData;
-        }
-    }
+    static_assert(traits::evm_rev() >= MONAD_ETH_TANGERINE_WHISTLE);
 
     // YP eq. 56
     if (MONAD_UNLIKELY(header.gas_limit < 5000)) {
@@ -109,7 +95,7 @@ Result<void> static_validate_header(BlockHeader const &header)
     }
 
     // EIP-1559
-    if constexpr (traits::evm_rev() < EVMC_LONDON) {
+    if constexpr (traits::evm_rev() < MONAD_ETH_LONDON) {
         if (MONAD_UNLIKELY(header.base_fee_per_gas.has_value())) {
             return BlockError::FieldBeforeFork;
         }
@@ -119,7 +105,7 @@ Result<void> static_validate_header(BlockHeader const &header)
     }
 
     // EIP-7685
-    if constexpr (traits::evm_rev() < EVMC_PRAGUE) {
+    if constexpr (traits::evm_rev() < MONAD_ETH_PRAGUE) {
         if (MONAD_UNLIKELY(header.requests_hash.has_value())) {
             return BlockError::FieldBeforeFork;
         }
@@ -129,7 +115,7 @@ Result<void> static_validate_header(BlockHeader const &header)
     }
 
     // EIP-4844 and EIP-4788
-    if constexpr (traits::evm_rev() < EVMC_CANCUN) {
+    if constexpr (traits::evm_rev() < MONAD_ETH_CANCUN) {
         if (MONAD_UNLIKELY(
                 header.blob_gas_used.has_value() ||
                 header.excess_blob_gas.has_value() ||
@@ -145,7 +131,7 @@ Result<void> static_validate_header(BlockHeader const &header)
     }
 
     // EIP-4895
-    if constexpr (traits::evm_rev() < EVMC_SHANGHAI) {
+    if constexpr (traits::evm_rev() < MONAD_ETH_SHANGHAI) {
         if (MONAD_UNLIKELY(header.withdrawals_root.has_value())) {
             return BlockError::FieldBeforeFork;
         }
@@ -155,7 +141,7 @@ Result<void> static_validate_header(BlockHeader const &header)
     }
 
     // EIP-3675
-    if constexpr (traits::evm_rev() >= EVMC_PARIS) {
+    if constexpr (traits::evm_rev() >= MONAD_ETH_PARIS) {
         if (MONAD_UNLIKELY(header.difficulty != 0)) {
             return BlockError::PowBlockAfterMerge;
         }
@@ -177,8 +163,7 @@ Result<void> static_validate_header(BlockHeader const &header)
 EXPLICIT_TRAITS(static_validate_header);
 
 template <Traits traits>
-constexpr Result<void>
-static_validate_ommers(Chain const &chain, Block const &block)
+Result<void> static_validate_ommers(Chain const &chain, Block const &block)
 {
     // YP eq. 33
     if (compute_ommers_hash(block.ommers) != block.header.ommers_hash) {
@@ -186,7 +171,7 @@ static_validate_ommers(Chain const &chain, Block const &block)
     }
 
     // EIP-3675
-    if constexpr (traits::evm_rev() >= EVMC_PARIS) {
+    if constexpr (traits::evm_rev() >= MONAD_ETH_PARIS) {
         if (MONAD_UNLIKELY(!block.ommers.empty())) {
             return BlockError::TooManyOmmers;
         }
@@ -205,7 +190,7 @@ static_validate_ommers(Chain const &chain, Block const &block)
 
     // YP eq. 167
     for (auto const &ommer : block.ommers) {
-        evmc_revision const rev =
+        monad_eth_revision const rev =
             chain.get_revision(ommer.number, ommer.timestamp);
         BOOST_OUTCOME_TRY([&] {
             SWITCH_EVM_TRAITS(static_validate_header, ommer);
@@ -217,17 +202,16 @@ static_validate_ommers(Chain const &chain, Block const &block)
 }
 
 template <Traits traits>
-constexpr Result<void> static_validate_4844(Block const &block)
+Result<void> static_validate_4844(Block const &block)
 {
-    if constexpr (traits::evm_rev() >= EVMC_CANCUN) {
+    if constexpr (traits::evm_rev() >= MONAD_ETH_CANCUN) {
         uint64_t blob_gas_used = 0;
         for (auto const &tx : block.transactions) {
             if (tx.type == TransactionType::eip4844) {
                 blob_gas_used += get_total_blob_gas(tx);
             }
         }
-        constexpr uint64_t MAX_BLOB_GAS_PER_BLOCK = 786432;
-        if (MONAD_UNLIKELY(blob_gas_used > MAX_BLOB_GAS_PER_BLOCK)) {
+        if (MONAD_UNLIKELY(blob_gas_used > max_blob_gas_per_block<traits>())) {
             return BlockError::GasAboveLimit;
         }
         if (MONAD_UNLIKELY(
@@ -239,11 +223,10 @@ constexpr Result<void> static_validate_4844(Block const &block)
 }
 
 template <Traits traits>
-constexpr Result<void>
-static_validate_body(Chain const &chain, Block const &block)
+Result<void> static_validate_body(Chain const &chain, Block const &block)
 {
     // EIP-4895
-    if constexpr (traits::evm_rev() < EVMC_SHANGHAI) {
+    if constexpr (traits::evm_rev() < MONAD_ETH_SHANGHAI) {
         if (MONAD_UNLIKELY(block.withdrawals.has_value())) {
             return BlockError::FieldBeforeFork;
         }
@@ -342,10 +325,15 @@ quick_status_code_from_enum<monad::BlockError>::value_mappings()
         {BlockError::TooManyOmmers, "too many ommers", {}},
         {BlockError::DuplicateOmmers, "duplicate ommers", {}},
         {BlockError::InvalidOmmerHeader, "invalid ommer header", {}},
-        {BlockError::WrongDaoExtraData, "wrong dao extra data", {}},
         {BlockError::WrongLogsBloom, "wrong logs bloom", {}},
         {BlockError::InvalidGasUsed, "invalid gas used", {}},
-        {BlockError::WrongMerkleRoot, "wrong merkle root", {}}};
+        {BlockError::WrongMerkleRoot, "wrong merkle root", {}},
+        {BlockError::SystemCallMissingCode,
+         "system call target has no code",
+         {}},
+        {BlockError::SystemCallFailed, "system call failed", {}},
+        {BlockError::InvalidRequestsHash, "invalid requests hash", {}},
+        {BlockError::InvalidDepositLog, "invalid deposit log", {}}};
 
     return v;
 }

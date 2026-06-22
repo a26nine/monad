@@ -13,21 +13,49 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include <category/execution/ethereum/block_hash_buffer.hpp>
 #include <category/execution/ethereum/block_reward.hpp>
+#include <category/execution/ethereum/chain/ethereum_mainnet.hpp>
 #include <category/execution/ethereum/core/account.hpp>
+#include <category/execution/ethereum/core/transaction.hpp>
+#include <category/execution/ethereum/evmc_host.hpp>
+#include <category/execution/ethereum/execute_message.hpp>
+#include <category/execution/ethereum/execute_transaction.hpp>
+#include <category/execution/ethereum/process_requests.hpp>
 #include <category/execution/ethereum/state2/block_state.hpp>
 #include <category/execution/ethereum/state3/account_state.hpp>
 #include <category/execution/ethereum/state3/state.hpp>
+#include <category/execution/ethereum/trace/call_tracer.hpp>
 #include <category/execution/ethereum/trace/state_tracer.hpp>
+#include <category/execution/ethereum/tx_context.hpp>
+#include <category/execution/ethereum/validate_transaction.hpp>
+#include <category/execution/monad/chain/monad_chain.hpp>
+#include <category/execution/monad/reserve_balance.hpp>
 #include <monad/test/traits_test.hpp>
 
+#include <category/core/address.hpp>
+#include <category/core/bytes.hpp>
+#include <category/core/int.hpp>
+#include <category/execution/ethereum/chain/chain.hpp>
+#include <category/execution/ethereum/db/trie_db.hpp>
+#include <category/execution/ethereum/db/util.hpp>
+#include <category/execution/ethereum/state2/state_deltas.hpp>
+#include <category/mpt/db.hpp>
+#include <category/vm/evm/monad/revision.h>
+#include <category/vm/evm/traits.hpp>
+#include <category/vm/vm.hpp>
+#include <evmc/evmc.h>
+#include <evmc/evmc.hpp>
+
+#include <ankerl/unordered_dense.h>
 #include <gtest/gtest.h>
-#include <intx/intx.hpp>
 #include <nlohmann/json.hpp>
 
 #include <test_resource_data.h>
 
 #include <bit>
+#include <optional>
+#include <vector>
 
 using namespace monad;
 using namespace monad::test;
@@ -83,16 +111,12 @@ TEST(PrestateTracer, pre_state_to_json)
     prestate.emplace(ADDR_A, as);
 
     // The State setup is only used to get code
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
     commit_sequential(
-        tdb,
-        StateDeltas{},
-        Code{{A_CODE_HASH, A_ICODE}},
-        BlockHeader{.number = 0});
+        tdb, sd({}), Code{{A_CODE_HASH, A_ICODE}}, BlockHeader{.number = 0});
 
     BlockState bs(tdb, vm);
     State s(bs, Incarnation{0, 0});
@@ -126,12 +150,11 @@ TEST(PrestateTracer, zero_nonce)
     prestate.emplace(ADDR_A, as);
 
     // The State setup is only used to get code
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
-    commit_sequential(tdb, StateDeltas{}, Code{}, BlockHeader{.number = 0});
+    commit_sequential(tdb, sd({}), Code{}, BlockHeader{.number = 0});
 
     BlockState bs(tdb, vm);
     State s(bs, Incarnation{0, 0});
@@ -153,8 +176,7 @@ TEST(PrestateTracer, state_deltas_to_json)
 {
     Account a{.balance = 500, .code_hash = A_CODE_HASH, .nonce = 1};
 
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -169,7 +191,7 @@ TEST(PrestateTracer, state_deltas_to_json)
 
     commit_sequential(
         tdb,
-        state_deltas,
+        sd(state_deltas),
         Code{{A_CODE_HASH, A_ICODE}},
         BlockHeader{.number = 0});
 
@@ -200,8 +222,7 @@ TEST(PrestateTracer, statediff_account_creation)
 {
     Account a{.balance = 500, .code_hash = A_CODE_HASH, .nonce = 1};
 
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -210,7 +231,7 @@ TEST(PrestateTracer, statediff_account_creation)
 
     commit_sequential(
         tdb,
-        state_deltas,
+        sd(state_deltas),
         Code{{A_CODE_HASH, A_ICODE}},
         BlockHeader{.number = 0});
 
@@ -240,8 +261,7 @@ TEST(PrestateTracer, statediff_balance_nonce_update)
     b.nonce += 1;
     b.balance -= 100;
 
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -250,7 +270,7 @@ TEST(PrestateTracer, statediff_balance_nonce_update)
 
     commit_sequential(
         tdb,
-        state_deltas,
+        sd(state_deltas),
         Code{{A_CODE_HASH, A_ICODE}},
         BlockHeader{.number = 0});
 
@@ -285,8 +305,7 @@ TEST(PrestateTracer, statediff_delete_storage)
     b.nonce += 1;
     b.balance -= 100;
 
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -302,11 +321,11 @@ TEST(PrestateTracer, statediff_delete_storage)
 
     commit_sequential(
         tdb,
-        state_deltas1,
+        sd(state_deltas1),
         Code{{A_CODE_HASH, A_ICODE}},
         BlockHeader{.number = 0});
 
-    commit_sequential(tdb, state_deltas2, Code{}, BlockHeader{.number = 1});
+    commit_sequential(tdb, sd(state_deltas2), Code{}, BlockHeader{.number = 1});
 
     BlockState bs(tdb, vm);
     State s(bs, Incarnation{0, 0});
@@ -341,8 +360,7 @@ TEST(PrestateTracer, statediff_multiple_fields_update)
     Account a{.balance = 500, .code_hash = A_CODE_HASH, .nonce = 1};
     Account b{.balance = 42, .code_hash = B_CODE_HASH, .nonce = 2};
 
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -359,7 +377,7 @@ TEST(PrestateTracer, statediff_multiple_fields_update)
 
     commit_sequential(
         tdb,
-        state_deltas,
+        sd(state_deltas),
         Code{{A_CODE_HASH, A_ICODE}, {B_CODE_HASH, B_ICODE}},
         BlockHeader{.number = 0});
 
@@ -400,8 +418,7 @@ TEST(PrestateTracer, statediff_account_deletion)
 {
     Account a{.balance = 32, .code_hash = NULL_HASH, .nonce = 1};
 
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -409,13 +426,13 @@ TEST(PrestateTracer, statediff_account_deletion)
         {ADDR_A, StateDelta{.account = {std::nullopt, a}, .storage = {}}},
     };
 
-    commit_sequential(tdb, state_deltas1, Code{}, BlockHeader{.number = 0});
+    commit_sequential(tdb, sd(state_deltas1), Code{}, BlockHeader{.number = 0});
 
     StateDeltas state_deltas2{
         {ADDR_A, StateDelta{.account = {a, std::nullopt}, .storage = {}}},
     };
 
-    commit_sequential(tdb, state_deltas2, Code{}, BlockHeader{.number = 1});
+    commit_sequential(tdb, sd(state_deltas2), Code{}, BlockHeader{.number = 1});
 
     BlockState bs(tdb, vm);
     State s(bs, Incarnation{0, 0});
@@ -453,7 +470,7 @@ TEST(PrestateTracer, geth_example_prestate)
         .balance = 0x7a48734599f7284, .code_hash = NULL_HASH, .nonce = 1133};
     OriginalAccountState bs{b};
     Account const c{
-        .balance = intx::from_string<uint256_t>("0x2638035a26d133809"),
+        .balance = uint256_t::from_string("0x2638035a26d133809"),
         .code_hash = NULL_HASH,
         .nonce = 0};
     OriginalAccountState cs{c};
@@ -467,16 +484,12 @@ TEST(PrestateTracer, geth_example_prestate)
     prestate.emplace(addr4, as);
 
     // The State setup is only used to get code
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
     commit_sequential(
-        tdb,
-        StateDeltas{},
-        Code{{A_CODE_HASH, A_ICODE}},
-        BlockHeader{.number = 0});
+        tdb, sd({}), Code{{A_CODE_HASH, A_ICODE}}, BlockHeader{.number = 0});
 
     BlockState bs0(tdb, vm);
     State s(bs0, Incarnation{0, 0});
@@ -523,12 +536,11 @@ TEST(PrestateTracer, geth_example_statediff)
     };
 
     // The State setup is only used to get code
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
-    commit_sequential(tdb, state_deltas, Code{}, BlockHeader{.number = 0});
+    commit_sequential(tdb, sd(state_deltas), Code{}, BlockHeader{.number = 0});
 
     BlockState bs0(tdb, vm);
     State s(bs0, Incarnation{0, 0});
@@ -557,12 +569,11 @@ TEST(PrestateTracer, prestate_empty)
     trace::Map<Address, OriginalAccountState> prestate{};
 
     // The State setup is only used to get code
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
-    commit_sequential(tdb, {}, Code{}, BlockHeader{.number = 0});
+    commit_sequential(tdb, sd({}), Code{}, BlockHeader{.number = 0});
 
     BlockState bs(tdb, vm);
     State s(bs, Incarnation{0, 0});
@@ -578,12 +589,11 @@ TEST(PrestateTracer, statediff_empty)
     StateDeltas state_deltas{};
 
     // The State setup is only used to get code
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
-    commit_sequential(tdb, state_deltas, Code{}, BlockHeader{.number = 0});
+    commit_sequential(tdb, sd(state_deltas), Code{}, BlockHeader{.number = 0});
 
     BlockState bs(tdb, vm);
     State s(bs, Incarnation{0, 0});
@@ -604,12 +614,11 @@ TYPED_TEST(TraitsTest, access_list_empty)
 {
     StateDeltas state_deltas{};
 
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
-    commit_sequential(tdb, state_deltas, Code{}, BlockHeader{.number = 0});
+    commit_sequential(tdb, sd(state_deltas), Code{}, BlockHeader{.number = 0});
 
     BlockState bs(tdb, vm);
     State s(bs, Incarnation{0, 0});
@@ -622,16 +631,112 @@ TYPED_TEST(TraitsTest, access_list_empty)
     EXPECT_EQ(storage, nlohmann::json::parse("[]"));
 }
 
+TYPED_TEST(TraitsTest, access_list_state_view_excludes_rejected_frame)
+{
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
+    TrieDb tdb{db};
+    vm::VM vm;
+
+    commit_sequential(tdb, sd({}), Code{}, BlockHeader{.number = 0});
+
+    BlockState bs(tdb, vm);
+    State s(bs, Incarnation{0, 0});
+
+    s.push();
+    s.access_storage<typename TestFixture::Trait>(addr4, key4);
+    s.pop_reject();
+
+    nlohmann::json storage;
+    auto const authorities = std::vector<std::optional<Address>>{};
+    AccessListTracer tracer{storage, addr1, addr2, std::nullopt, authorities};
+    tracer.encode<typename TestFixture::Trait>(s);
+
+    // Rejected frames must not leak accessed storage back into State. RPC
+    // access-list observability needs to be handled by tracer-specific capture.
+    EXPECT_EQ(storage, nlohmann::json::parse("[]"));
+}
+
+TYPED_TEST(TraitsTest, access_list_records_rejected_frame_storage)
+{
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
+    TrieDb tdb{db};
+    vm::VM vm;
+
+    commit_sequential(tdb, sd({}), Code{}, BlockHeader{.number = 0});
+
+    BlockState bs(tdb, vm);
+    State s(bs, Incarnation{0, 0});
+
+    nlohmann::json storage;
+    auto const authorities = std::vector<std::optional<Address>>{};
+    StateTracer tracer =
+        AccessListTracer{storage, addr1, addr2, std::nullopt, authorities};
+
+    s.push();
+    s.access_storage<typename TestFixture::Trait>(addr4, key4);
+    on_frame_reject(tracer, s);
+    s.pop_reject();
+
+    run_tracer<typename TestFixture::Trait>(tracer, s);
+
+    auto const json_str = R"(
+        [
+            {
+                "address" : "0xc8ba32cab1757528daf49033e3673fae77dcf05d",
+                "storageKeys": [
+                    "0x0000000000000000000000000000000000000000000000000000000000000000"
+                ]
+            }
+        ]
+    )";
+
+    EXPECT_EQ(storage, nlohmann::json::parse(json_str));
+}
+
+TYPED_TEST(TraitsTest, access_list_records_rejected_frame_regular_account)
+{
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
+    TrieDb tdb{db};
+    vm::VM vm;
+
+    commit_sequential(tdb, sd({}), Code{}, BlockHeader{.number = 0});
+
+    BlockState bs(tdb, vm);
+    State s(bs, Incarnation{0, 0});
+
+    nlohmann::json storage;
+    auto const authorities = std::vector<std::optional<Address>>{};
+    StateTracer tracer =
+        AccessListTracer{storage, addr1, addr2, std::nullopt, authorities};
+
+    s.push();
+    s.access_account(addr4);
+    on_frame_reject(tracer, s);
+    s.pop_reject();
+
+    run_tracer<typename TestFixture::Trait>(tracer, s);
+
+    auto const json_str = R"(
+        [
+            {
+                "address" : "0xc8ba32cab1757528daf49033e3673fae77dcf05d",
+                "storageKeys": []
+            }
+        ]
+    )";
+
+    EXPECT_EQ(storage, nlohmann::json::parse(json_str));
+}
+
 TYPED_TEST(TraitsTest, access_list_write)
 {
     StateDeltas state_deltas{};
 
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
-    commit_sequential(tdb, state_deltas, Code{}, BlockHeader{.number = 0});
+    commit_sequential(tdb, sd(state_deltas), Code{}, BlockHeader{.number = 0});
 
     BlockState bs(tdb, vm);
     State s(bs, Incarnation{0, 0});
@@ -640,9 +745,9 @@ TYPED_TEST(TraitsTest, access_list_write)
     s.create_account_no_rollback(addr2);
     s.create_account_no_rollback(addr3);
 
-    s.access_storage(addr2, key1);
-    s.access_storage(addr2, key2);
-    s.access_storage(addr3, key3);
+    s.access_storage<typename TestFixture::Trait>(addr2, key1);
+    s.access_storage<typename TestFixture::Trait>(addr2, key2);
+    s.access_storage<typename TestFixture::Trait>(addr3, key3);
 
     nlohmann::json storage;
     auto const authorities = std::vector<std::optional<Address>>{};
@@ -673,14 +778,11 @@ TYPED_TEST(TraitsTest, access_list_write)
 
 TYPED_TEST(TraitsTest, access_list_regular_account)
 {
-    StateDeltas state_deltas{};
-
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
-    commit_sequential(tdb, state_deltas, Code{}, BlockHeader{.number = 0});
+    commit_sequential(tdb, sd({}), Code{}, BlockHeader{.number = 0});
 
     BlockState bs(tdb, vm);
 
@@ -720,7 +822,7 @@ TYPED_TEST(TraitsTest, access_list_regular_account)
         s.create_account_no_rollback(addr3);
         s.create_account_no_rollback(addr4);
 
-        s.access_storage(addr4, key1);
+        s.access_storage<typename TestFixture::Trait>(addr4, key1);
 
         nlohmann::json storage;
         auto const authorities = std::vector<std::optional<Address>>{};
@@ -745,14 +847,11 @@ TYPED_TEST(TraitsTest, access_list_regular_account)
 
 TYPED_TEST(TraitsTest, access_list_sender)
 {
-    StateDeltas state_deltas{};
-
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
-    commit_sequential(tdb, state_deltas, Code{}, BlockHeader{.number = 0});
+    commit_sequential(tdb, sd({}), Code{}, BlockHeader{.number = 0});
 
     BlockState bs(tdb, vm);
 
@@ -781,7 +880,7 @@ TYPED_TEST(TraitsTest, access_list_sender)
         s.create_account_no_rollback(addr2);
         s.create_account_no_rollback(addr3);
 
-        s.access_storage(addr1, key1);
+        s.access_storage<typename TestFixture::Trait>(addr1, key1);
 
         nlohmann::json storage;
         auto const authorities = std::vector<std::optional<Address>>{};
@@ -806,14 +905,11 @@ TYPED_TEST(TraitsTest, access_list_sender)
 
 TYPED_TEST(TraitsTest, access_list_beneficiary)
 {
-    StateDeltas state_deltas{};
-
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
-    commit_sequential(tdb, state_deltas, Code{}, BlockHeader{.number = 0});
+    commit_sequential(tdb, sd({}), Code{}, BlockHeader{.number = 0});
 
     BlockState bs(tdb, vm);
 
@@ -842,7 +938,7 @@ TYPED_TEST(TraitsTest, access_list_beneficiary)
         s.create_account_no_rollback(addr2);
         s.create_account_no_rollback(addr3);
 
-        s.access_storage(addr2, key1);
+        s.access_storage<typename TestFixture::Trait>(addr2, key1);
 
         nlohmann::json storage;
         auto const authorities = std::vector<std::optional<Address>>{};
@@ -867,14 +963,11 @@ TYPED_TEST(TraitsTest, access_list_beneficiary)
 
 TYPED_TEST(TraitsTest, access_list_recipient)
 {
-    StateDeltas state_deltas{};
-
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
-    commit_sequential(tdb, state_deltas, Code{}, BlockHeader{.number = 0});
+    commit_sequential(tdb, sd({}), Code{}, BlockHeader{.number = 0});
 
     BlockState bs(tdb, vm);
 
@@ -903,7 +996,7 @@ TYPED_TEST(TraitsTest, access_list_recipient)
         s.create_account_no_rollback(addr2);
         s.create_account_no_rollback(addr3);
 
-        s.access_storage(addr3, key1);
+        s.access_storage<typename TestFixture::Trait>(addr3, key1);
 
         nlohmann::json storage;
         auto const authorities = std::vector<std::optional<Address>>{};
@@ -928,14 +1021,11 @@ TYPED_TEST(TraitsTest, access_list_recipient)
 
 TYPED_TEST(TraitsTest, access_list_authorities)
 {
-    StateDeltas state_deltas{};
-
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
-    commit_sequential(tdb, state_deltas, Code{}, BlockHeader{.number = 0});
+    commit_sequential(tdb, sd({}), Code{}, BlockHeader{.number = 0});
 
     BlockState bs(tdb, vm);
 
@@ -969,8 +1059,8 @@ TYPED_TEST(TraitsTest, access_list_authorities)
         s.create_account_no_rollback(addr4);
         s.create_account_no_rollback(addr5);
 
-        s.access_storage(addr4, key1);
-        s.access_storage(addr5, key2);
+        s.access_storage<typename TestFixture::Trait>(addr4, key1);
+        s.access_storage<typename TestFixture::Trait>(addr5, key2);
 
         nlohmann::json storage;
         auto const authorities =
@@ -1002,14 +1092,11 @@ TYPED_TEST(TraitsTest, access_list_authorities)
 
 TYPED_TEST(TraitsTest, access_list_precompiles)
 {
-    StateDeltas state_deltas{};
-
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
-    commit_sequential(tdb, state_deltas, Code{}, BlockHeader{.number = 0});
+    commit_sequential(tdb, sd({}), Code{}, BlockHeader{.number = 0});
 
     BlockState bs(tdb, vm);
 
@@ -1019,7 +1106,7 @@ TYPED_TEST(TraitsTest, access_list_precompiles)
         0x000000000000000000000000000000000000000b_address;
 
     auto const json_string = [] {
-        if constexpr (TestFixture::Trait::evm_rev() < EVMC_PRAGUE) {
+        if constexpr (TestFixture::Trait::evm_rev() < MONAD_ETH_PRAGUE) {
             return R"(
                     [
                         {
@@ -1057,8 +1144,7 @@ TYPED_TEST(TraitsTest, access_list_precompiles)
 TEST(PrestateTracer, prestate_access_storage)
 {
     // Setup matter
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -1067,13 +1153,13 @@ TEST(PrestateTracer, prestate_access_storage)
     // Block 0
     commit_sequential(
         tdb,
-        StateDeltas{
-            {ADDR_A,
-             StateDelta{
-                 .account = {std::nullopt, a},
-                 .storage = {StorageDeltas{
-                     {key1, {bytes32_t{}, value1}},
-                     {key2, {bytes32_t{}, value2}}}}}}},
+        sd(
+            {{ADDR_A,
+              StateDelta{
+                  .account = {std::nullopt, a},
+                  .storage = {StorageDeltas{
+                      {key1, {bytes32_t{}, value1}},
+                      {key2, {bytes32_t{}, value2}}}}}}}),
         {},
         BlockHeader{.number = 0});
 
@@ -1129,8 +1215,7 @@ TEST(PrestateTracer, prestate_access_storage)
 TEST(PrestateTracer, prestate_retain_beneficiary_set_storage)
 {
     // Setup matter
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -1139,8 +1224,7 @@ TEST(PrestateTracer, prestate_retain_beneficiary_set_storage)
     // Block 0
     commit_sequential(
         tdb,
-        StateDeltas{
-            {ADDR_A, StateDelta{.account = {std::nullopt, a}, .storage = {}}}},
+        sd({{ADDR_A, StateDelta{.account = {std::nullopt, a}, .storage = {}}}}),
         {},
         BlockHeader{.number = 0});
 
@@ -1199,8 +1283,7 @@ TEST(PrestateTracer, prestate_retain_beneficiary_set_storage)
 TEST(PrestateTracer, prestate_retain_beneficiary_modified_storage)
 {
     // Setup matter
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -1209,11 +1292,11 @@ TEST(PrestateTracer, prestate_retain_beneficiary_modified_storage)
     // Block 0
     commit_sequential(
         tdb,
-        StateDeltas{
-            {ADDR_A,
-             StateDelta{
-                 .account = {std::nullopt, a},
-                 .storage = {{key1, {bytes32_t{}, value1}}}}}},
+        sd(
+            {{ADDR_A,
+              StateDelta{
+                  .account = {std::nullopt, a},
+                  .storage = {{key1, {bytes32_t{}, value1}}}}}}),
         {},
         BlockHeader{.number = 0});
 
@@ -1277,8 +1360,7 @@ TEST(PrestateTracer, prestate_retain_beneficiary_modified_storage)
 TEST(PrestateTracer, prestate_retain_beneficiary_modified_balance)
 {
     // Setup matter
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -1287,8 +1369,7 @@ TEST(PrestateTracer, prestate_retain_beneficiary_modified_balance)
     // Block 0
     commit_sequential(
         tdb,
-        StateDeltas{
-            {ADDR_A, StateDelta{.account = {std::nullopt, a}, .storage = {}}}},
+        sd({{ADDR_A, StateDelta{.account = {std::nullopt, a}, .storage = {}}}}),
         {},
         BlockHeader{.number = 0});
 
@@ -1349,8 +1430,7 @@ TEST(PrestateTracer, prestate_retain_beneficiary_modified_balance)
 TEST(PrestateTracer, prestate_retain_beneficiary_modified_nonce)
 {
     // Setup matter
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -1359,8 +1439,7 @@ TEST(PrestateTracer, prestate_retain_beneficiary_modified_nonce)
     // Block 0
     commit_sequential(
         tdb,
-        StateDeltas{
-            {ADDR_A, StateDelta{.account = {std::nullopt, a}, .storage = {}}}},
+        sd({{ADDR_A, StateDelta{.account = {std::nullopt, a}, .storage = {}}}}),
         {},
         BlockHeader{.number = 0});
 
@@ -1417,8 +1496,7 @@ TEST(PrestateTracer, prestate_retain_beneficiary_modified_nonce)
 TEST(PrestateTracer, prestate_retain_beneficiary_modified_code_hash)
 {
     // Setup matter
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -1427,8 +1505,7 @@ TEST(PrestateTracer, prestate_retain_beneficiary_modified_code_hash)
     // Block 0
     commit_sequential(
         tdb,
-        StateDeltas{
-            {ADDR_A, StateDelta{.account = {std::nullopt, a}, .storage = {}}}},
+        sd({{ADDR_A, StateDelta{.account = {std::nullopt, a}, .storage = {}}}}),
         Code{{A_CODE_HASH, A_ICODE}},
         BlockHeader{.number = 0});
 
@@ -1488,8 +1565,7 @@ TEST(PrestateTracer, prestate_retain_beneficiary_modified_code_hash)
 TEST(PrestateTracer, prestate_retain_beneficiary_access_storage)
 {
     // Setup matter
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -1498,13 +1574,13 @@ TEST(PrestateTracer, prestate_retain_beneficiary_access_storage)
     // Block 0
     commit_sequential(
         tdb,
-        StateDeltas{
-            {ADDR_A,
-             StateDelta{
-                 .account = {std::nullopt, a},
-                 .storage = {StorageDeltas{
-                     {key1, {bytes32_t{}, value1}},
-                     {key2, {bytes32_t{}, value2}}}}}}},
+        sd(
+            {{ADDR_A,
+              StateDelta{
+                  .account = {std::nullopt, a},
+                  .storage = {StorageDeltas{
+                      {key1, {bytes32_t{}, value1}},
+                      {key2, {bytes32_t{}, value2}}}}}}}),
         {},
         BlockHeader{.number = 0});
 
@@ -1560,8 +1636,7 @@ TEST(PrestateTracer, prestate_retain_beneficiary_access_storage)
 TEST(PrestateTracer, prestate_omit_beneficiary)
 {
     // Setup matter
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -1570,8 +1645,7 @@ TEST(PrestateTracer, prestate_omit_beneficiary)
     // Block 0
     commit_sequential(
         tdb,
-        StateDeltas{
-            {ADDR_A, StateDelta{.account = {std::nullopt, a}, .storage = {}}}},
+        sd({{ADDR_A, StateDelta{.account = {std::nullopt, a}, .storage = {}}}}),
         {},
         BlockHeader{.number = 0});
 
@@ -1615,8 +1689,7 @@ TEST(PrestateTracer, prestate_omit_beneficiary)
 TEST(PrestateTracer, prestate_empty_block_no_reward)
 {
     // Setup matter
-    InMemoryMachine machine;
-    mpt::Db db{machine};
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
     TrieDb tdb{db};
     vm::VM vm;
 
@@ -1624,7 +1697,7 @@ TEST(PrestateTracer, prestate_empty_block_no_reward)
     Block const block{header, {}, {}};
 
     // Block 0
-    commit_sequential(tdb, {}, {}, header);
+    commit_sequential(tdb, sd({}), {}, header);
 
     BlockState bs(tdb, vm);
     State s(bs, Incarnation{0, 0});
@@ -1659,4 +1732,495 @@ TEST(PrestateTracer, prestate_empty_block_no_reward)
 
         EXPECT_EQ(trace, nlohmann::json::parse(json_str));
     }
+}
+
+// CodeTracer coverage.
+//
+// Each test below constructs `StateTracer{CodeTracer{}}`, exercises exactly
+// one of the `on_read_code` recording sites in the execution layer, and
+// asserts that the recorded codes map contains the (code_hash, intercode)
+// pair that the site is responsible for. The sites are:
+//
+//   1. EvmcHostBase::get_code_size  (EXTCODESIZE host hook)
+//   2. EvmcHostBase::copy_code       (EXTCODECOPY host hook)
+//   3. execute_call_message          (called contract code, per CALL)
+//   4. system_call (via process_requests, EIP-7002/7251)
+//   5. validate_ethereum_transaction (EIP-7702 sender code check)
+//   6. process_authorizations        (EIP-7702 authority code check)
+//   7. dipped_into_reserve + is_delegated (Monad reserve-balance revert path)
+//
+// Without these, future changes to any site can silently drop a code preimage
+// from the witness without CI catching it.
+
+namespace
+{
+    // EIP-7002/7251 predeploy addresses + a trivial system contract stub
+    // (single STOP opcode) used by the process_requests test below.
+    constexpr auto WITHDRAWAL_REQUEST_ADDRESS =
+        0x00000961ef480eb55e80d19ad83579a64c007002_address;
+    constexpr auto CONSOLIDATION_REQUEST_ADDRESS =
+        0x0000bbddc7ce488642fb579f8b00f3a590007251_address;
+    inline auto const SYSTEM_STUB_CODE = monad::from_hex("00").value();
+    inline auto const SYSTEM_STUB_CODE_HASH =
+        to_bytes(monad::keccak256(SYSTEM_STUB_CODE));
+    inline auto const SYSTEM_STUB_ICODE =
+        monad::vm::make_shared_intercode(SYSTEM_STUB_CODE);
+}
+
+// Site 1: EvmcHostBase::get_code_size
+TYPED_TEST(TraitsTest, code_tracer_records_extcodesize)
+{
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
+    TrieDb tdb{db};
+    vm::VM vm;
+
+    commit_sequential(
+        tdb,
+        sd(
+            {{ADDR_A,
+              StateDelta{
+                  .account =
+                      {std::nullopt, Account{.code_hash = A_CODE_HASH}}}}}),
+        Code{{A_CODE_HASH, A_ICODE}},
+        BlockHeader{.number = 0});
+
+    BlockState bs{tdb, vm};
+    State state{bs, Incarnation{0, 0}};
+
+    NoopCallTracer call_tracer;
+    BlockHashBufferFinalized const block_hash_buffer;
+    Transaction const tx{};
+    auto const chain_ctx =
+        ChainContext<typename TestFixture::Trait>::debug_empty();
+    uint256_t const base_fee{0};
+    trace::StateTracer state_tracer = trace::CodeTracer{};
+    EvmcHost<typename TestFixture::Trait> host{
+        call_tracer,
+        state_tracer,
+        EMPTY_TX_CONTEXT,
+        block_hash_buffer,
+        state,
+        tx,
+        base_fee,
+        0,
+        chain_ctx};
+
+    EXPECT_EQ(host.get_code_size(ADDR_A), A_ICODE->size());
+
+    auto const &codes = std::get<trace::CodeTracer>(state_tracer).codes;
+    EXPECT_EQ(codes.size(), 1u);
+    auto const it = codes.find(A_CODE_HASH);
+    ASSERT_TRUE(it != codes.end());
+    EXPECT_EQ(
+        byte_string_view(it->second->code(), it->second->size()),
+        byte_string_view(A_ICODE->code(), A_ICODE->size()));
+}
+
+// Site 2: EvmcHostBase::copy_code
+TYPED_TEST(TraitsTest, code_tracer_records_extcodecopy)
+{
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
+    TrieDb tdb{db};
+    vm::VM vm;
+
+    commit_sequential(
+        tdb,
+        sd(
+            {{ADDR_A,
+              StateDelta{
+                  .account =
+                      {std::nullopt, Account{.code_hash = A_CODE_HASH}}}}}),
+        Code{{A_CODE_HASH, A_ICODE}},
+        BlockHeader{.number = 0});
+
+    BlockState bs{tdb, vm};
+    State state{bs, Incarnation{0, 0}};
+
+    NoopCallTracer call_tracer;
+    BlockHashBufferFinalized const block_hash_buffer;
+    Transaction const tx{};
+    auto const chain_ctx =
+        ChainContext<typename TestFixture::Trait>::debug_empty();
+    uint256_t const base_fee{0};
+    trace::StateTracer state_tracer = trace::CodeTracer{};
+    EvmcHost<typename TestFixture::Trait> host{
+        call_tracer,
+        state_tracer,
+        EMPTY_TX_CONTEXT,
+        block_hash_buffer,
+        state,
+        tx,
+        base_fee,
+        0,
+        chain_ctx};
+
+    std::vector<uint8_t> buf(A_ICODE->size(), 0);
+    auto const n = host.copy_code(ADDR_A, 0, buf.data(), buf.size());
+    EXPECT_EQ(n, A_ICODE->size());
+    EXPECT_TRUE(std::equal(
+        buf.begin(),
+        buf.begin() + static_cast<std::ptrdiff_t>(n),
+        A_ICODE->code()));
+
+    auto const &codes = std::get<trace::CodeTracer>(state_tracer).codes;
+    EXPECT_EQ(codes.size(), 1u);
+    auto const it = codes.find(A_CODE_HASH);
+    ASSERT_TRUE(it != codes.end());
+    EXPECT_EQ(
+        byte_string_view(it->second->code(), it->second->size()),
+        byte_string_view(A_ICODE->code(), A_ICODE->size()));
+}
+
+// Site 3: execute_call_message records called-contract code
+TYPED_TEST(TraitsTest, code_tracer_records_called_contract_code)
+{
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
+    TrieDb tdb{db};
+    vm::VM vm;
+
+    commit_sequential(
+        tdb,
+        sd({{ADDR_A,
+             StateDelta{
+                 .account =
+                     {std::nullopt, Account{.balance = 10'000'000'000}}}},
+            {ADDR_B,
+             StateDelta{
+                 .account =
+                     {std::nullopt, Account{.code_hash = B_CODE_HASH}}}}}),
+        Code{{B_CODE_HASH, B_ICODE}},
+        BlockHeader{.number = 0});
+
+    BlockState bs{tdb, vm};
+    State state{bs, Incarnation{0, 0}};
+
+    NoopCallTracer call_tracer;
+    BlockHashBufferFinalized const block_hash_buffer;
+    Transaction const tx{};
+    auto const chain_ctx =
+        ChainContext<typename TestFixture::Trait>::debug_empty();
+    uint256_t const base_fee{0};
+    trace::StateTracer state_tracer = trace::CodeTracer{};
+    EvmcHost<typename TestFixture::Trait> host{
+        call_tracer,
+        state_tracer,
+        EMPTY_TX_CONTEXT,
+        block_hash_buffer,
+        state,
+        tx,
+        base_fee,
+        0,
+        chain_ctx};
+
+    // depth = 1 to bypass the depth-0 reserve-balance revert path; we want
+    // to isolate execute_call_message's own code-read here.
+    auto msg_memory = vm.message_memory_ref();
+    evmc_message const msg{
+        .kind = EVMC_CALL,
+        .depth = 1,
+        .gas = 1'000'000,
+        .recipient = ADDR_B,
+        .sender = ADDR_A,
+        .code_address = ADDR_B,
+        .memory_handle = msg_memory.get(),
+        .memory = msg_memory.get(),
+        .memory_capacity = vm.message_memory_capacity(),
+    };
+
+    (void)execute_call_message<typename TestFixture::Trait>(&host, state, msg);
+
+    auto const &codes = std::get<trace::CodeTracer>(state_tracer).codes;
+    auto const it = codes.find(B_CODE_HASH);
+    ASSERT_TRUE(it != codes.end())
+        << "called contract code not recorded by execute_call_message";
+    EXPECT_EQ(
+        byte_string_view(it->second->code(), it->second->size()),
+        byte_string_view(B_ICODE->code(), B_ICODE->size()));
+}
+
+// Site 4: system_call (via process_requests) records system-contract code
+TYPED_TEST(TraitsTest, code_tracer_records_system_contract_code)
+{
+    if constexpr (!TestFixture::Trait::eip_7685_active()) {
+        GTEST_SKIP() << "process_requests requires EIP-7685";
+    }
+    else {
+        mpt::Db db{std::make_unique<InMemoryMachine>()};
+        TrieDb tdb{db};
+        vm::VM vm;
+
+        commit_sequential(
+            tdb,
+            sd({{WITHDRAWAL_REQUEST_ADDRESS,
+                 StateDelta{
+                     .account =
+                         {std::nullopt,
+                          Account{.code_hash = SYSTEM_STUB_CODE_HASH}}}},
+                {CONSOLIDATION_REQUEST_ADDRESS,
+                 StateDelta{
+                     .account =
+                         {std::nullopt,
+                          Account{.code_hash = SYSTEM_STUB_CODE_HASH}}}}}),
+            Code{{SYSTEM_STUB_CODE_HASH, SYSTEM_STUB_ICODE}},
+            BlockHeader{.number = 0});
+
+        BlockState bs{tdb, vm};
+        State state{bs, Incarnation{0, 0}};
+
+        BlockHashBufferFinalized const block_hash_buffer;
+        BlockHeader const header{};
+        EthereumMainnet const chain;
+        auto const chain_ctx =
+            ChainContext<typename TestFixture::Trait>::debug_empty();
+        trace::StateTracer state_tracer = trace::CodeTracer{};
+
+        auto const result = process_requests<typename TestFixture::Trait>(
+            chain,
+            state,
+            block_hash_buffer,
+            header,
+            state_tracer,
+            chain_ctx,
+            std::span<Receipt const>{});
+        ASSERT_TRUE(result.has_value());
+
+        auto const &codes = std::get<trace::CodeTracer>(state_tracer).codes;
+        auto const it = codes.find(SYSTEM_STUB_CODE_HASH);
+        ASSERT_TRUE(it != codes.end())
+            << "system contract code not recorded by system_call";
+        EXPECT_EQ(
+            byte_string_view(it->second->code(), it->second->size()),
+            byte_string_view(
+                SYSTEM_STUB_ICODE->code(), SYSTEM_STUB_ICODE->size()));
+    }
+}
+
+// Site 5: validate_ethereum_transaction records sender code on EIP-7702 check
+TYPED_TEST(TraitsTest, code_tracer_records_sender_code_in_validate)
+{
+    if constexpr (TestFixture::Trait::evm_rev() < MONAD_ETH_PRAGUE) {
+        GTEST_SKIP() << "EIP-7702 sender code read requires Prague+";
+    }
+    else {
+        mpt::Db db{std::make_unique<InMemoryMachine>()};
+        TrieDb tdb{db};
+        vm::VM vm;
+
+        // Sender has non-empty code so the Prague+ branch reads it. The code
+        // is not a delegation indicator, so validate returns SenderNotEoa,
+        // but the read site still records --- which is the property under test.
+        commit_sequential(
+            tdb,
+            sd(
+                {{ADDR_A,
+                  StateDelta{
+                      .account =
+                          {std::nullopt,
+                           Account{
+                               .balance = 100'000'000'000'000'000,
+                               .code_hash = C_CODE_HASH}}}}}),
+            Code{{C_CODE_HASH, C_ICODE}},
+            BlockHeader{.number = 0});
+
+        BlockState bs{tdb, vm};
+        State state{bs, Incarnation{0, 0}};
+
+        Transaction const tx{.gas_limit = 60'500};
+        trace::StateTracer state_tracer = trace::CodeTracer{};
+        (void)validate_ethereum_transaction<typename TestFixture::Trait>(
+            tx, ADDR_A, state, state_tracer);
+
+        auto const &codes = std::get<trace::CodeTracer>(state_tracer).codes;
+        auto const it = codes.find(C_CODE_HASH);
+        ASSERT_TRUE(it != codes.end())
+            << "sender code not recorded by validate_ethereum_transaction";
+        EXPECT_EQ(
+            byte_string_view(it->second->code(), it->second->size()),
+            byte_string_view(C_ICODE->code(), C_ICODE->size()));
+    }
+}
+
+// Site 6: process_authorizations records authority code
+//
+// Goes through ExecuteTransactionNoValidation because process_authorizations
+// is a private member. The authority's code (B_CODE) is neither empty nor a
+// delegation indicator, so the entry is rejected after the read --- but the
+// read site still records, which is what we assert.
+//
+// Restricted to Ethereum Prague+ to avoid having to construct a sized
+// Monad-specific ChainContext for init_reserve_balance_context, which runs
+// at the top of operator() for monad traits. The Monad MONAD_FOUR+ exercise
+// of process_authorizations is structurally identical and is indirectly
+// covered by the witness-generation integration tests.
+TYPED_TEST(EvmTraitsTest, code_tracer_records_authorization_code)
+{
+    if constexpr (TestFixture::Trait::evm_rev() < MONAD_ETH_PRAGUE) {
+        GTEST_SKIP() << "EIP-7702 authority code read requires Prague+";
+    }
+    else {
+        mpt::Db db{std::make_unique<InMemoryMachine>()};
+        TrieDb tdb{db};
+        vm::VM vm;
+
+        commit_sequential(
+            tdb,
+            sd({{ADDR_A,
+                 StateDelta{
+                     .account =
+                         {std::nullopt,
+                          Account{
+                              .balance = 100'000'000'000'000'000,
+                              .nonce = 0}}}},
+                {ADDR_B,
+                 StateDelta{
+                     .account =
+                         {std::nullopt, Account{.code_hash = B_CODE_HASH}}}}}),
+            Code{{B_CODE_HASH, B_ICODE}},
+            BlockHeader{.number = 0});
+
+        BlockState bs{tdb, vm};
+        State state{bs, Incarnation{0, 0}};
+
+        // One authorization entry whose authority is ADDR_B. The authorities
+        // span shadows recovered addresses; we set it to ADDR_B directly,
+        // sidestepping signature recovery.
+        AuthorizationEntry auth{};
+        auth.sc.chain_id = 0; // 0 always matches host_chain_id in step 1
+        auth.nonce = 0;
+        auth.address = ADDR_B;
+        Transaction tx{
+            .max_fee_per_gas = 1,
+            .gas_limit = 100'000,
+            .to = ADDR_B,
+            .type = TransactionType::eip7702,
+        };
+        tx.authorization_list.push_back(auth);
+
+        std::vector<std::optional<Address>> const authorities = {ADDR_B};
+
+        NoopCallTracer call_tracer;
+        BlockHashBufferFinalized const block_hash_buffer;
+        auto const chain_ctx =
+            ChainContext<typename TestFixture::Trait>::debug_empty();
+        uint256_t const base_fee{0};
+        trace::StateTracer state_tracer = trace::CodeTracer{};
+        EvmcHost<typename TestFixture::Trait> host{
+            call_tracer,
+            state_tracer,
+            EMPTY_TX_CONTEXT,
+            block_hash_buffer,
+            state,
+            tx,
+            base_fee,
+            0,
+            chain_ctx};
+
+        (void)ExecuteTransactionNoValidation<typename TestFixture::Trait>{
+            EthereumMainnet{}, tx, ADDR_A, authorities, BlockHeader{}}(
+            state, host);
+
+        auto const &codes = std::get<trace::CodeTracer>(state_tracer).codes;
+        auto const it = codes.find(B_CODE_HASH);
+        ASSERT_TRUE(it != codes.end())
+            << "authority code not recorded by process_authorizations";
+        EXPECT_EQ(
+            byte_string_view(it->second->code(), it->second->size()),
+            byte_string_view(B_ICODE->code(), B_ICODE->size()));
+    }
+}
+
+// Sites 7+8: dipped_into_reserve and is_delegated (Monad MONAD_FOUR+).
+//
+// init_reserve_balance_context calls is_delegated for the sender, which
+// reads and records the sender's code when sender_code_hash != NULL_HASH.
+// revert_transaction -> dipped_into_reserve iterates state.current() and
+// records each non-empty code there (the read happens before the
+// is_delegated short-circuit, so non-delegated accounts are still recorded).
+//
+// We engineer the setup so each hash is attributable to exactly one site:
+//   - A_CODE_HASH: only recorded via is_delegated (sender is NOT in current())
+//   - B_CODE_HASH: only recorded via dipped_into_reserve (ADDR_B is in
+//                  current() but is not the sender, so the is_delegated call
+//                  above does not touch it).
+TYPED_TEST(MonadTraitsTest, code_tracer_records_reserve_balance_code)
+{
+    using Trait = typename TestFixture::Trait;
+    if (TestFixture::REV < MONAD_FOUR) {
+        GTEST_SKIP() << "reserve-balance code reads are MONAD_FOUR+ only";
+    }
+
+    constexpr auto SENDER = 0x5353535353535353535353535353535353535353_address;
+
+    mpt::Db db{std::make_unique<InMemoryMachine>()};
+    TrieDb tdb{db};
+    vm::VM vm;
+
+    commit_sequential(
+        tdb,
+        sd({{SENDER,
+             StateDelta{
+                 .account =
+                     {std::nullopt,
+                      Account{
+                          .balance = 100'000'000'000'000'000,
+                          .code_hash = A_CODE_HASH}}}},
+            {ADDR_B,
+             StateDelta{
+                 .account =
+                     {std::nullopt,
+                      Account{
+                          .balance = 100'000, .code_hash = B_CODE_HASH}}}}}),
+        Code{{A_CODE_HASH, A_ICODE}, {B_CODE_HASH, B_ICODE}},
+        BlockHeader{.number = 0});
+
+    BlockState bs{tdb, vm};
+    State state{bs, Incarnation{0, 0}};
+
+    // Bring ADDR_B into state.current() so dipped_into_reserve iterates it.
+    // Sender is intentionally NOT accessed: init_reserve_balance_context's
+    // is_delegated reads via state.get_code_hash / original_account_state,
+    // neither of which inserts into current_.
+    state.access_account(ADDR_B);
+
+    ankerl::unordered_dense::segmented_set<Address> const empty_neighbours;
+    std::vector<Address> const senders = {SENDER};
+    std::vector<std::vector<std::optional<Address>>> const authorities = {{}};
+    ankerl::unordered_dense::segmented_set<Address> senders_and_authorities;
+    senders_and_authorities.insert(SENDER);
+    ChainContext<Trait> const ctx{
+        .grandparent_senders_and_authorities = empty_neighbours,
+        .parent_senders_and_authorities = empty_neighbours,
+        .senders_and_authorities = senders_and_authorities,
+        .senders = senders,
+        .authorities = authorities};
+
+    Transaction const tx{.max_fee_per_gas = 1, .gas_limit = 21'000};
+    trace::StateTracer state_tracer = trace::CodeTracer{};
+
+    init_reserve_balance_context<Trait>(
+        state,
+        SENDER,
+        tx,
+        std::optional<uint256_t>{0},
+        /*i=*/0,
+        state_tracer,
+        ctx);
+
+    (void)revert_transaction<Trait>(
+        SENDER, tx, /*base_fee_per_gas=*/0, /*i=*/0, state, state_tracer, ctx);
+
+    auto const &codes = std::get<trace::CodeTracer>(state_tracer).codes;
+    auto const it_a = codes.find(A_CODE_HASH);
+    ASSERT_TRUE(it_a != codes.end())
+        << "sender code not recorded by is_delegated";
+    EXPECT_EQ(
+        byte_string_view(it_a->second->code(), it_a->second->size()),
+        byte_string_view(A_ICODE->code(), A_ICODE->size()));
+    auto const it_b = codes.find(B_CODE_HASH);
+    ASSERT_TRUE(it_b != codes.end())
+        << "current()-iterated account code not recorded by "
+           "dipped_into_reserve";
+    EXPECT_EQ(
+        byte_string_view(it_b->second->code(), it_b->second->size()),
+        byte_string_view(B_ICODE->code(), B_ICODE->size()));
 }

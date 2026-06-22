@@ -15,10 +15,10 @@
 
 #pragma once
 
+#include <category/core/address.hpp>
 #include <category/core/config.hpp>
 #include <category/core/result.hpp>
 #include <category/execution/ethereum/chain/chain.hpp>
-#include <category/execution/ethereum/core/address.hpp>
 #include <category/execution/ethereum/core/receipt.hpp>
 #include <category/execution/ethereum/trace/state_tracer.hpp>
 #include <category/vm/evm/traits.hpp>
@@ -46,8 +46,7 @@ template <Traits traits>
 class ExecuteTransactionNoValidation
 {
     evmc_message to_message(
-        vm::MemoryPool::Ref &msg_memory,
-        std::uint32_t msg_memory_capacity) const;
+        vm::MemoryPool::Ref &msg_memory, uint32_t msg_memory_capacity) const;
 
     uint64_t process_authorizations(State &, EvmcHost<traits> &);
 
@@ -83,6 +82,7 @@ class ExecuteTransaction : public ExecuteTransactionNoValidation<traits>
     boost::fibers::promise<void> &prev_;
     CallTracerBase &call_tracer_;
     trace::StateTracer &state_tracer_;
+    bool trace_transfers_;
 
     Result<evmc::Result> execute_impl2(State &);
     Receipt execute_final(State &, evmc::Result const &);
@@ -93,7 +93,8 @@ public:
         std::span<std::optional<Address> const>, BlockHeader const &,
         BlockHashBuffer const &, BlockState &, BlockMetrics &,
         boost::fibers::promise<void> &prev, CallTracerBase &,
-        trace::StateTracer &, ChainContext<traits> const &chain_ctx);
+        trace::StateTracer &, ChainContext<traits> const &chain_ctx,
+        bool trace_transfers = false);
     ~ExecuteTransaction() = default;
 
     Result<Receipt> operator()();

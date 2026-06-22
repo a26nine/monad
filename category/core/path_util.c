@@ -26,14 +26,15 @@
 #include <category/core/path_util.h>
 
 // Silence clang-tidy complaining about trying to close AT_FDCWD
-static void tidy_close(int fd)
+static void tidy_close(int const fd)
 {
     if (fd >= 0) {
         (void)close(fd);
     }
 }
 
-int monad_path_append(char **dst, char const *src, size_t *size)
+int monad_path_append(
+    char **const dst, char const *const src, size_t *const size)
 {
     if (dst == nullptr || src == nullptr || size == nullptr) {
         return EFAULT;
@@ -45,7 +46,7 @@ int monad_path_append(char **dst, char const *src, size_t *size)
         return EINVAL;
     }
     if (*size == 0) {
-        return ENAMETOOLONG;
+        return ERANGE;
     }
     **dst = '/';
     *dst += 1;
@@ -54,7 +55,7 @@ int monad_path_append(char **dst, char const *src, size_t *size)
     if (n >= *size) {
         *dst += *size;
         *size = 0;
-        return ENAMETOOLONG;
+        return ERANGE;
     }
     *dst += n;
     *size -= n;
@@ -62,8 +63,8 @@ int monad_path_append(char **dst, char const *src, size_t *size)
 }
 
 int monad_path_open_subdir(
-    int const init_dirfd, char const *path_suffix, mode_t mode,
-    int *final_dirfd, char *pathbuf, size_t pathbuf_size)
+    int const init_dirfd, char const *const path_suffix, mode_t const mode,
+    int *const final_dirfd, char *pathbuf, size_t pathbuf_size)
 {
     char *dir_name;
     char *tokctx;

@@ -13,6 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include <category/core/int.hpp>
 #include <category/vm/code.hpp>
 #include <category/vm/compiler.hpp>
 #include <category/vm/compiler/types.hpp>
@@ -28,6 +29,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -43,7 +45,7 @@ using namespace monad::vm::compiler;
 
 namespace
 {
-    std::vector<uint8_t> test_code(uint64_t index)
+    std::vector<uint8_t> test_code(uint64_t const index)
     {
         std::vector<uint8_t> code = {PUSH1, 1, PUSH8};
         for (uint64_t i = 0; i < 8; ++i) {
@@ -53,9 +55,9 @@ namespace
         return code;
     }
 
-    evmc::bytes32 test_hash(uint64_t index)
+    bytes32_t test_hash(uint64_t const index)
     {
-        evmc::bytes32 h{};
+        bytes32_t h{};
         for (uint64_t i = 0; i < 8; ++i) {
             h.bytes[31 - i] = static_cast<uint8_t>(index >> 8 * (7 - i));
         }
@@ -65,7 +67,7 @@ namespace
 
 TEST(async_compile_test, stress)
 {
-    using traits = EvmTraits<EVMC_CANCUN>;
+    using traits = EvmTraits<MONAD_ETH_CANCUN>;
 
     constexpr size_t P = 10;
     constexpr size_t L = 120;
@@ -114,8 +116,8 @@ TEST(async_compile_test, stress)
 
             auto const &ret = ctx->result;
             ASSERT_EQ(ret.status, runtime::StatusCode::Success);
-            ASSERT_EQ(uint256_t::load_le(ret.offset), index);
-            ASSERT_EQ(uint256_t::load_le(ret.size), 1);
+            ASSERT_EQ(load_le<uint256_t>(ret.offset), index);
+            ASSERT_EQ(load_le<uint256_t>(ret.size), 1);
         }
     };
 
@@ -138,7 +140,7 @@ TEST(async_compile_test, disable)
         auto const icode = make_shared_intercode(std::move(code));
 
         ASSERT_TRUE(
-            compiler.async_compile<EvmTraits<EVMC_PRAGUE>>(hash, icode));
+            compiler.async_compile<EvmTraits<MONAD_ETH_PRAGUE>>(hash, icode));
     }
 
     compiler.debug_wait_for_empty_queue();
@@ -152,4 +154,42 @@ TEST(async_compile_test, disable)
         auto const entry = ncode->entrypoint();
         ASSERT_TRUE(entry == nullptr);
     }
+}
+
+// id() is the sole key distinguishing cached native code between revisions, so
+// the two trait families must never produce a colliding value across their
+// independent enums.
+TEST(async_compile_test, trait_ids_distinct)
+{
+    std::array<uint64_t, 19> const ids{
+        EvmTraits<MONAD_ETH_ISTANBUL>::id(),
+        EvmTraits<MONAD_ETH_BERLIN>::id(),
+        EvmTraits<MONAD_ETH_LONDON>::id(),
+        EvmTraits<MONAD_ETH_PARIS>::id(),
+        EvmTraits<MONAD_ETH_SHANGHAI>::id(),
+        EvmTraits<MONAD_ETH_CANCUN>::id(),
+        EvmTraits<MONAD_ETH_PRAGUE>::id(),
+        EvmTraits<MONAD_ETH_OSAKA>::id(),
+        MonadTraits<MONAD_ZERO>::id(),
+        MonadTraits<MONAD_ONE>::id(),
+        MonadTraits<MONAD_TWO>::id(),
+        MonadTraits<MONAD_THREE>::id(),
+        MonadTraits<MONAD_FOUR>::id(),
+        MonadTraits<MONAD_FIVE>::id(),
+        MonadTraits<MONAD_SIX>::id(),
+        MonadTraits<MONAD_SEVEN>::id(),
+        MonadTraits<MONAD_EIGHT>::id(),
+        MonadTraits<MONAD_NINE>::id(),
+        MonadTraits<MONAD_NEXT>::id()};
+
+    // Trip-wire: adding a revision to either family shifts these sentinels,
+    // forcing the id list above to be extended so coverage stays exhaustive.
+    static_assert(
+        MONAD_NEXT == 10, "a monad_revision was added; extend the list above");
+    static_assert(
+        MONAD_ETH_EXPERIMENTAL == 15,
+        "a monad_eth_revision was added; extend the list above");
+
+    std::unordered_set<uint64_t> const unique(ids.begin(), ids.end());
+    EXPECT_EQ(unique.size(), ids.size());
 }

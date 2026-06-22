@@ -23,11 +23,13 @@
 #include <category/core/fiber/priority_pool.hpp>
 #include <category/core/hex.hpp>
 #include <category/core/keccak.hpp>
+#include <category/core/log.hpp>
 #include <category/core/procfs/statm.h>
 #include <category/execution/ethereum/block_hash_buffer.hpp>
 #include <category/execution/ethereum/core/block.hpp>
 #include <category/execution/ethereum/core/fmt/bytes_fmt.hpp>
 #include <category/execution/ethereum/core/rlp/block_rlp.hpp>
+#include <category/execution/ethereum/db/commit_builder.hpp>
 #include <category/execution/ethereum/db/db.hpp>
 #include <category/execution/ethereum/db/util.hpp>
 #include <category/execution/ethereum/event/exec_event_ctypes.h>
@@ -53,8 +55,6 @@
 
 #include <ankerl/unordered_dense.h>
 #include <boost/outcome/try.hpp>
-#include <quill/Quill.h>
-#include <quill/detail/LogMacros.h>
 
 #include <chrono>
 #include <deque>
@@ -228,8 +228,9 @@ Result<BlockExecOutput> propose_block(
     std::vector<std::vector<CallFrame>> call_frames{block.transactions.size()};
     std::vector<std::unique_ptr<CallTracerBase>> call_tracers{
         block.transactions.size()};
-    std::vector<std::unique_ptr<trace::StateTracer>> state_tracers{
-        block.transactions.size()};
+    std::vector<std::unique_ptr<trace::StateTracer>> state_tracers(
+        block.transactions.size());
+    trace::StateTracer system_call_state_tracer{std::monostate{}};
     for (unsigned i = 0; i < block.transactions.size(); ++i) {
         call_tracers[i] =
             enable_tracing
@@ -237,8 +238,8 @@ Result<BlockExecOutput> propose_block(
                       block.transactions[i], call_frames[i])}
                 : std::unique_ptr<CallTracerBase>{
                       std::make_unique<NoopCallTracer>()};
-        state_tracers[i] = std::unique_ptr<trace::StateTracer>{
-            std::make_unique<trace::StateTracer>(std::monostate{})};
+        state_tracers[i] =
+            std::make_unique<trace::StateTracer>(std::monostate{});
     }
 
     auto const
@@ -299,21 +300,37 @@ Result<BlockExecOutput> propose_block(
             block_metrics,
             call_tracers,
             state_tracers,
+            system_call_state_tracer,
             chain_context));
     record_block_marker_event(MONAD_EXEC_BLOCK_PERF_EVM_EXIT);
 
     // Database commit of state changes (incl. Merkle root calculations)
     block_state.log_debug();
     auto const commit_begin = std::chrono::steady_clock::now();
-    block_state.commit(
-        block_id,
-        block.header,
-        results,
-        call_frames,
-        senders,
-        block.transactions,
-        block.ommers,
-        block.withdrawals);
+    auto [state, code, _] = std::move(block_state).release();
+    MONAD_ASSERT(state);
+
+    CommitBuilder builder(block.header.number);
+    builder.add_state_deltas(*state)
+        .add_code(code)
+        .add_receipts(results)
+        .add_transactions(block.transactions, senders)
+        .add_call_frames(call_frames)
+        .add_ommers(block.ommers);
+    if (block.withdrawals.has_value()) {
+        builder.add_withdrawals(block.withdrawals.value());
+    }
+    db.commit(
+        block_id, builder, block.header, std::move(state), [&](BlockHeader &h) {
+            // second stage: populate block header
+            h.receipts_root = db.receipts_root();
+            h.state_root = db.state_root();
+            h.withdrawals_root = db.withdrawals_root();
+            h.transactions_root = db.transactions_root();
+            h.gas_used = results.empty() ? 0 : results.back().gas_used;
+            h.logs_bloom = compute_bloom(results);
+            h.ommers_hash = compute_ommers_hash(block.ommers);
+        });
     [[maybe_unused]] auto const commit_time =
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - commit_begin);

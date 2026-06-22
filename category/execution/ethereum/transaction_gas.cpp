@@ -33,7 +33,8 @@ MONAD_NAMESPACE_BEGIN
 namespace
 {
     // Approximates `factor * e ** (n/d) using Taylor expansion
-    uint256_t fake_exponential(uint256_t factor, uint256_t n, uint256_t d)
+    uint256_t fake_exponential(
+        uint256_t const factor, uint256_t const n, uint256_t const d)
     {
         int i = 1;
         uint256_t output = 0;
@@ -95,12 +96,11 @@ std::pair<uint64_t, uint64_t> tokens_in_calldata(Transaction const &tx) noexcept
 template <Traits traits>
 uint64_t g_data(Transaction const &tx) noexcept
 {
+    static_assert(traits::evm_rev() >= MONAD_ETH_ISTANBUL);
+
     auto const [zeros, nonzeros] = tokens_in_calldata(tx);
 
-    if constexpr (traits::evm_rev() < EVMC_ISTANBUL) {
-        // EIP-2028
-        return zeros * 4u + nonzeros * 68u;
-    }
+    // EIP-2028
     return zeros * 4u + nonzeros * 16u;
 }
 
@@ -109,28 +109,24 @@ EXPLICIT_TRAITS(g_data);
 template <Traits traits>
 uint64_t intrinsic_gas(Transaction const &tx) noexcept
 {
-    if constexpr (traits::evm_rev() < EVMC_HOMESTEAD) {
-        // YP, section 6.2, Eqn. 60
-        return 21'000 + g_data<traits>(tx);
+    static_assert(traits::evm_rev() >= MONAD_ETH_TANGERINE_WHISTLE);
+
+    uint64_t gas = 21'000 + g_data<traits>(tx) + g_txn_create(tx);
+
+    // EIP-2930: access-list and storage-key cost (Berlin)
+    if constexpr (traits::evm_rev() >= MONAD_ETH_BERLIN) {
+        gas += g_access_and_storage(tx);
     }
-    else if constexpr (traits::evm_rev() < EVMC_BERLIN) {
-        return 21'000 + g_data<traits>(tx) + g_txn_create(tx);
+    // EIP-3860: per-word initcode cost (Shanghai)
+    if constexpr (traits::evm_rev() >= MONAD_ETH_SHANGHAI) {
+        gas += g_extra_cost_init(tx);
     }
-    else if constexpr (traits::evm_rev() < EVMC_SHANGHAI) {
-        return 21'000 + g_data<traits>(tx) + g_txn_create(tx) +
-               g_access_and_storage(tx);
+    // EIP-7702: authorization-list cost (Prague)
+    if constexpr (traits::evm_rev() >= MONAD_ETH_PRAGUE) {
+        gas += g_authorization(tx);
     }
-    else if constexpr (traits::evm_rev() < EVMC_CANCUN) {
-        // EIP-3860
-        return 21'000 + g_data<traits>(tx) + g_txn_create(tx) +
-               g_access_and_storage(tx) + g_extra_cost_init(tx);
-    }
-    else {
-        // EIP-7702
-        return 21'000 + g_data<traits>(tx) + g_txn_create(tx) +
-               g_access_and_storage(tx) + g_extra_cost_init(tx) +
-               g_authorization(tx);
-    }
+
+    return gas;
 }
 
 EXPLICIT_TRAITS(intrinsic_gas);
@@ -165,7 +161,7 @@ template <Traits traits>
 uint256_t
 gas_price(Transaction const &tx, uint256_t const &base_fee_per_gas) noexcept
 {
-    if constexpr (traits::evm_rev() < EVMC_LONDON) {
+    if constexpr (traits::evm_rev() < MONAD_ETH_LONDON) {
         return tx.max_fee_per_gas;
     }
     // EIP-1559
@@ -181,7 +177,7 @@ uint64_t g_star(
 {
     // EIP-3529
     constexpr auto max_refund_quotient =
-        traits::evm_rev() >= EVMC_LONDON ? 5 : 2;
+        traits::evm_rev() >= MONAD_ETH_LONDON ? 5 : 2;
     auto const refund_allowance =
         (tx.gas_limit - gas_remaining) / max_refund_quotient;
     return gas_remaining + std::min(refund_allowance, refund);
@@ -203,7 +199,7 @@ uint256_t calculate_txn_award(
     Transaction const &tx, uint256_t const &base_fee_per_gas,
     uint64_t const gas_used) noexcept
 {
-    if constexpr (traits::evm_rev() < EVMC_LONDON) {
+    if constexpr (traits::evm_rev() < MONAD_ETH_LONDON) {
         return gas_used * gas_price<traits>(tx, base_fee_per_gas);
     }
     return gas_used * priority_fee_per_gas(tx, base_fee_per_gas);
@@ -211,25 +207,30 @@ uint256_t calculate_txn_award(
 
 EXPLICIT_TRAITS(calculate_txn_award);
 
+template <Traits traits>
 uint256_t
 calc_blob_fee(Transaction const &tx, uint64_t const excess_blob_gas) noexcept
 {
-    return get_base_fee_per_blob_gas(excess_blob_gas) * get_total_blob_gas(tx);
+    return get_base_fee_per_blob_gas<traits>(excess_blob_gas) *
+           get_total_blob_gas(tx);
 }
 
+EXPLICIT_TRAITS(calc_blob_fee);
+
+template <Traits traits>
 uint256_t get_base_fee_per_blob_gas(uint64_t const excess_blob_gas) noexcept
 {
     constexpr uint256_t MIN_BASE_FEE_PER_BLOB_GAS = 1;
-    constexpr uint256_t BLOB_BASE_FEE_UPDATE_FRACTION = 3338477;
     return fake_exponential(
         MIN_BASE_FEE_PER_BLOB_GAS,
         uint256_t{excess_blob_gas},
-        BLOB_BASE_FEE_UPDATE_FRACTION);
+        uint256_t{blob_base_fee_update_fraction<traits>()});
 }
+
+EXPLICIT_TRAITS(get_base_fee_per_blob_gas);
 
 uint64_t get_total_blob_gas(Transaction const &tx) noexcept
 {
-    constexpr uint64_t GAS_PER_BLOB{131072};
     return GAS_PER_BLOB * tx.blob_versioned_hashes.size();
 }
 

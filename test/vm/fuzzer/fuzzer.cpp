@@ -25,9 +25,12 @@
 #include "test_state.hpp"
 #include "transaction.hpp"
 
+#include <category/core/address.hpp>
+#include <category/core/assert.h>
+#include <category/core/bytes.hpp>
 #include <category/vm/compiler/ir/x86/types.hpp>
-#include <category/vm/core/assert.h>
 #include <category/vm/evm/opcodes.hpp>
+#include <category/vm/evm/revision.h>
 #include <category/vm/fuzzing/generator/choice.hpp>
 #include <category/vm/fuzzing/generator/generator.hpp>
 #include <category/vm/memory_pool.hpp>
@@ -35,12 +38,13 @@
 
 #include <evmone/constants.hpp>
 #include <evmone/evmone.h>
+#include <intx/intx.hpp>
 
 #include <evmc/evmc.h>
 #include <evmc/evmc.hpp>
 
 #include <CLI/CLI.hpp>
-#include <intx/intx.hpp>
+#include <category/core/int.hpp>
 
 #include <algorithm>
 #include <array>
@@ -64,8 +68,9 @@
 #include <vector>
 
 using namespace evmone::state;
-using namespace evmc::literals;
-using namespace monad;
+using monad::Address;
+using monad::bytes32_t;
+using namespace monad::literals;
 using namespace monad::vm::fuzzing;
 using namespace std::chrono_literals;
 
@@ -115,8 +120,8 @@ static constexpr std::string_view to_string(evmc_status_code const sc) noexcept
     }
 }
 
-static constexpr auto genesis_address =
-    0xBEEFCAFE000000000000000000000000BA5EBA11_address;
+static constexpr Address genesis_address =
+    monad::address_from_hex("0xBEEFCAFE000000000000000000000000BA5EBA11");
 
 static constexpr auto block_gas_limit = 300'000'000;
 
@@ -132,7 +137,7 @@ static evmone::test::TestState initial_state()
     return init;
 }
 
-static Transaction tx_from(State &state, evmc::address const &addr) noexcept
+static Transaction tx_from(State &state, Address const &addr) noexcept
 {
     auto tx = Transaction{};
     tx.gas_limit = block_gas_limit;
@@ -145,8 +150,8 @@ static Transaction tx_from(State &state, evmc::address const &addr) noexcept
 // book-keeping is elided here to keep the implementation simple and allow us to
 // send arbitrary messages to update the state.
 static evmc::Result transition(
-    State &state, evmc_message const &msg, evmc_revision const rev,
-    evmc::VM &vm, std::int64_t const block_gas_left)
+    State &state, evmc_message const &msg, monad_eth_revision const rev,
+    evmc::VM &vm, int64_t const block_gas_left)
 {
     // Pre-transaction clean-up.
     // - Clear transient storage.
@@ -179,7 +184,8 @@ static evmc::Result transition(
     ++sender_acc.nonce;
     sender_acc.balance -= block_gas_left * effective_gas_price;
 
-    Host host{rev, vm, state, block, hashes, tx};
+    // evmone's test Host consumes evmc_revision directly.
+    Host host{to_evmc_revision(rev), vm, state, block, hashes, tx};
 
     sender_acc.access_status = EVMC_ACCESS_WARM; // Tx sender is always warm.
     if (tx.to.has_value()) {
@@ -189,7 +195,7 @@ static evmc::Result transition(
     auto result = host.call(msg);
     auto gas_used = block_gas_left - result.gas_left;
 
-    auto const max_refund_quotient = rev >= EVMC_LONDON ? 5 : 2;
+    auto const max_refund_quotient = rev >= MONAD_ETH_LONDON ? 5 : 2;
     auto const refund_limit = gas_used / max_refund_quotient;
     auto const refund = std::min(result.gas_refund, refund_limit);
     gas_used -= refund;
@@ -203,31 +209,28 @@ static evmc::Result transition(
             return p.second.destructed;
         });
 
-    // Delete empty accounts after every transaction. This is strictly required
-    // until Byzantium where intermediate state root hashes are part of the
-    // transaction receipt.
-    // TODO: Consider limiting this only to Spurious Dragon.
-    if (rev >= EVMC_SPURIOUS_DRAGON) {
-        std::erase_if(
-            state.get_modified_accounts(),
-            [](std::pair<address const, Account> const &p) noexcept {
-                auto const &acc = p.second;
-                return acc.erase_if_empty && acc.is_empty();
-            });
-    }
+    // EIP-161 (Spurious Dragon) requires touched-empty accounts to be
+    // deleted at the end of each transaction as part of the state
+    // transition. The fuzzer's State does not perform this cleanup
+    // automatically, so we do it here after every call.
+    std::erase_if(
+        state.get_modified_accounts(),
+        [](std::pair<address const, Account> const &p) noexcept {
+            auto const &acc = p.second;
+            return acc.erase_if_empty && acc.is_empty();
+        });
 
     return result;
 }
 
-static evmc::address deploy_contract(
-    State &state, evmc::address const &from,
-    std::span<std::uint8_t const> const code_)
+static Address deploy_contract(
+    State &state, Address const &from, std::span<uint8_t const> const code_)
 {
     auto code = bytes{code_.data(), code_.size()};
 
     auto const create_address =
         compute_create_address(from, state.get_or_insert(from).nonce++);
-    MONAD_VM_DEBUG_ASSERT(state.find(create_address) == nullptr);
+    MONAD_DEBUG_ASSERT(state.find(create_address) == nullptr);
 
     state.insert(
         create_address,
@@ -239,27 +242,27 @@ static evmc::address deploy_contract(
             .transient_storage = {},
             .code = code});
 
-    MONAD_VM_ASSERT(state.find(create_address) != nullptr);
+    MONAD_ASSERT(state.find(create_address) != nullptr);
 
     return create_address;
 }
 
-static evmc::address deploy_delegated_contract(
-    State &state, evmc::address const &from, evmc::address const &delegatee)
+static Address deploy_delegated_contract(
+    State &state, Address const &from, Address const &delegatee)
 {
     std::vector<uint8_t> code = {0xef, 0x01, 0x00};
     code.append_range(delegatee.bytes);
-    MONAD_VM_ASSERT(code.size() == 23);
+    MONAD_ASSERT(code.size() == 23);
     return deploy_contract(state, from, code);
 }
 
-static evmc::address deploy_delegated_contracts(
-    State &evmone_state, State &monad_state, evmc::address const &from,
-    evmc::address delegatee)
+static Address deploy_delegated_contracts(
+    State &evmone_state, State &monad_state, Address const &from,
+    Address delegatee)
 {
     auto const a = deploy_delegated_contract(evmone_state, from, delegatee);
     auto const a1 = deploy_delegated_contract(monad_state, from, delegatee);
-    MONAD_VM_ASSERT(a == a1);
+    MONAD_ASSERT(a == a1);
     assert_equal(evmone_state, monad_state);
     return a;
 }
@@ -278,7 +281,8 @@ static void clean_storage(State &state)
         for (auto it = acc.storage.begin(); it != acc.storage.end();) {
             auto const &[k, v] = *it;
 
-            if (v.current == evmc::bytes32{} && v.original == evmc::bytes32{} &&
+            if (bytes32_t(v.current) == bytes32_t{} &&
+                bytes32_t(v.original) == bytes32_t{} &&
                 v.access_status == EVMC_ACCESS_COLD) {
                 it = acc.storage.erase(it);
             }
@@ -289,7 +293,7 @@ static void clean_storage(State &state)
         for (auto it = acc.transient_storage.begin();
              it != acc.transient_storage.end();) {
             auto const &[k, v] = *it;
-            if (v == evmc::bytes32{}) {
+            if (bytes32_t(v) == bytes32_t{}) {
                 it = acc.transient_storage.erase(it);
             }
             else {
@@ -309,14 +313,14 @@ namespace
         static constexpr seed_t default_seed =
             std::numeric_limits<seed_t>::max();
 
-        std::int64_t iterations_per_run = 100;
+        int64_t iterations_per_run = 100;
         std::size_t messages = 4;
         seed_t seed = default_seed;
         std::size_t runs = std::numeric_limits<std::size_t>::max();
         bool print_stats = false;
         BlockchainTestVM::Implementation implementation =
             BlockchainTestVM::Implementation::Compiler;
-        evmc_revision revision = EVMC_OSAKA;
+        monad_eth_revision revision = MONAD_ETH_OSAKA;
         std::optional<std::string> focus_path = std::nullopt;
         std::optional<GeneratorFocus> focus = std::nullopt;
 
@@ -372,31 +376,22 @@ static arguments parse_args(int const argc, char **const argv)
         args.print_stats,
         "Print message result statistics when logging");
 
-    auto const rev_map = std::map<std::string, evmc_revision>{
-        {"FRONTIER", EVMC_FRONTIER},
-        {"HOMESTEAD", EVMC_HOMESTEAD},
-        {"TANGERINE_WHISTLE", EVMC_TANGERINE_WHISTLE},
-        {"TANGERINE WHISTLE", EVMC_TANGERINE_WHISTLE},
-        {"SPURIOUS_DRAGON", EVMC_SPURIOUS_DRAGON},
-        {"SPURIOUS DRAGON", EVMC_SPURIOUS_DRAGON},
-        {"BYZANTIUM", EVMC_BYZANTIUM},
-        {"CONSTANTINOPLE", EVMC_CONSTANTINOPLE},
-        {"PETERSBURG", EVMC_PETERSBURG},
-        {"ISTANBUL", EVMC_ISTANBUL},
-        {"BERLIN", EVMC_BERLIN},
-        {"LONDON", EVMC_LONDON},
-        {"PARIS", EVMC_PARIS},
-        {"SHANGHAI", EVMC_SHANGHAI},
-        {"CANCUN", EVMC_CANCUN},
-        {"PRAGUE", EVMC_PRAGUE},
-        {"OSAKA", EVMC_OSAKA},
-        {"LATEST", EVMC_LATEST_STABLE_REVISION}};
+    auto const rev_map = std::map<std::string, monad_eth_revision>{
+        {"ISTANBUL", MONAD_ETH_ISTANBUL},
+        {"BERLIN", MONAD_ETH_BERLIN},
+        {"LONDON", MONAD_ETH_LONDON},
+        {"PARIS", MONAD_ETH_PARIS},
+        {"SHANGHAI", MONAD_ETH_SHANGHAI},
+        {"CANCUN", MONAD_ETH_CANCUN},
+        {"PRAGUE", MONAD_ETH_PRAGUE},
+        {"OSAKA", MONAD_ETH_OSAKA},
+        {"LATEST", MONAD_ETH_LATEST_STABLE_REVISION}};
     app.add_option(
            "--revision",
            args.revision,
            std::format(
                "Set EVM revision (default: {})",
-               evmc_revision_to_string(args.revision)))
+               monad_eth_revision_to_string(args.revision)))
         ->transform(CLI::CheckedTransformer(rev_map, CLI::ignore_case))
         ->option_text("TEXT");
 
@@ -412,7 +407,7 @@ static arguments parse_args(int const argc, char **const argv)
 }
 
 static evmc_status_code fuzz_iteration(
-    evmc_message const &msg, evmc_revision const rev, State &evmone_state,
+    evmc_message const &msg, monad_eth_revision const rev, State &evmone_state,
     evmc::VM &evmone_vm, State &monad_state, evmc::VM &monad_vm,
     BlockchainTestVM::Implementation const impl)
 {
@@ -515,8 +510,8 @@ static void do_run(
     auto evmone_state = State{initial_state_};
     auto monad_state = State{initial_state_};
 
-    auto contract_addresses = std::vector<evmc::address>{};
-    auto known_addresses = std::vector<evmc::address>{};
+    auto contract_addresses = std::vector<Address>{};
+    auto known_addresses = std::vector<Address>{};
 
     auto exit_code_stats = std::unordered_map<evmc_status_code, std::size_t>{};
     auto total_messages = std::size_t{0};
@@ -534,7 +529,7 @@ static void do_run(
                       Choice(0.60, [](auto &) { return pow2_focus; }),
                       Choice(0.05, [](auto &) { return dyn_jump_focus; }));
 
-        if (rev >= EVMC_PRAGUE && toss(engine, 0.001)) {
+        if (rev >= MONAD_ETH_PRAGUE && toss(engine, 0.001)) {
             auto precompile =
                 monad::vm::fuzzing::generate_precompile_address(engine, rev);
             auto const a = deploy_delegated_contracts(
@@ -559,14 +554,14 @@ static void do_run(
                 deploy_contract(evmone_state, genesis_address, contract);
             auto const a1 =
                 deploy_contract(monad_state, genesis_address, contract);
-            MONAD_VM_ASSERT(a == a1);
+            MONAD_ASSERT(a == a1);
 
             assert_equal(evmone_state, monad_state);
 
             contract_addresses.push_back(a);
             known_addresses.push_back(a);
 
-            if (args.revision >= EVMC_PRAGUE && toss(engine, 0.2)) {
+            if (args.revision >= MONAD_ETH_PRAGUE && toss(engine, 0.2)) {
                 auto const b = deploy_delegated_contracts(
                     evmone_state, monad_state, genesis_address, a);
                 known_addresses.push_back(b);
@@ -615,7 +610,7 @@ static void run_loop(int argc, char **argv)
     if (args.focus_path) {
         args.focus = parse_generator_focus(*args.focus_path);
     }
-    auto const *msg_rev = evmc_revision_to_string(args.revision);
+    auto const *msg_rev = monad_eth_revision_to_string(args.revision);
     for (auto i = 0u; i < args.runs; ++i) {
         std::cerr << std::format(
             "Fuzzing with seed @ {}: {}\n", msg_rev, args.seed);

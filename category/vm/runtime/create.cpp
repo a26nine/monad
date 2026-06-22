@@ -13,10 +13,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include <category/core/address.hpp>
+#include <category/core/bytes.hpp>
+#include <category/core/int.hpp>
+#include <category/core/likely.h>
 #include <category/core/runtime/uint256.hpp>
-#include <category/vm/core/assert.h>
 #include <category/vm/evm/delegation.hpp>
 #include <category/vm/evm/explicit_traits.hpp>
+#include <category/vm/evm/revision.h>
 #include <category/vm/evm/traits.hpp>
 #include <category/vm/runtime/bin.hpp>
 #include <category/vm/runtime/create.hpp>
@@ -24,33 +28,36 @@
 #include <category/vm/runtime/types.hpp>
 
 #include <evmc/evmc.h>
+#include <evmc/evmc.hpp>
 
 #include <cstdint>
 
 namespace monad::vm::runtime
 {
-    consteval Bin<2> create_code_word_cost(evmc_revision rev)
+    consteval Bin<2> create_code_word_cost(monad_eth_revision const rev)
     {
-        return (rev >= EVMC_SHANGHAI) ? bin<2> : bin<0>;
+        return (rev >= MONAD_ETH_SHANGHAI) ? bin<2> : bin<0>;
     }
 
-    consteval Bin<4> create2_code_word_cost(evmc_revision rev)
+    consteval Bin<4> create2_code_word_cost(monad_eth_revision const rev)
     {
-        return (rev >= EVMC_SHANGHAI) ? bin<8> : bin<6>;
+        return (rev >= MONAD_ETH_SHANGHAI) ? bin<8> : bin<6>;
     }
 
     template <Traits traits>
     uint256_t create_impl(
         Context *ctx, uint256_t const &value, uint256_t const &offset_word,
         uint256_t const &size_word, uint256_t const &salt_word,
-        evmc_call_kind kind, std::int64_t remaining_block_base_gas)
+        evmc_call_kind const kind, int64_t const remaining_block_base_gas)
     {
-        if (MONAD_VM_UNLIKELY(ctx->env.evmc_flags & EVMC_STATIC)) {
+        static_assert(traits::evm_rev() >= MONAD_ETH_TANGERINE_WHISTLE);
+
+        if (MONAD_UNLIKELY(ctx->env.evmc_flags & EVMC_STATIC)) {
             ctx->exit(StatusCode::Error);
         }
 
         if constexpr (
-            traits::evm_rev() >= EVMC_PRAGUE &&
+            traits::evm_rev() >= MONAD_ETH_PRAGUE &&
             !traits::can_create_inside_delegated()) {
             if (evm::resolve_delegation(
                     ctx->host, ctx->context, ctx->env.recipient)) {
@@ -68,8 +75,8 @@ namespace monad::vm::runtime
             ctx->expand_memory<traits>(offset + size);
         }
 
-        if constexpr (traits::evm_rev() >= EVMC_SHANGHAI) {
-            if (MONAD_VM_UNLIKELY(*size > traits::max_initcode_size())) {
+        if constexpr (traits::evm_rev() >= MONAD_ETH_SHANGHAI) {
+            if (MONAD_UNLIKELY(*size > traits::max_initcode_size())) {
                 ctx->exit(StatusCode::OutOfGas);
             }
         }
@@ -81,27 +88,26 @@ namespace monad::vm::runtime
 
         ctx->deduct_gas(min_words * word_cost);
 
-        if (MONAD_VM_UNLIKELY(ctx->env.depth >= 1024)) {
+        if (MONAD_UNLIKELY(ctx->env.depth >= 1024)) {
             return 0;
         }
 
         auto gas = ctx->gas_remaining + remaining_block_base_gas;
-        if constexpr (traits::evm_rev() >= EVMC_TANGERINE_WHISTLE) {
-            gas = gas - (gas / 64);
-        }
+        gas = gas - (gas / 64);
 
         auto const message = evmc_message{
             .kind = kind,
             .flags = 0,
             .depth = ctx->env.depth + 1,
             .gas = gas,
-            .recipient = evmc::address{},
+            .recipient = {},
             .sender = ctx->env.recipient,
             .input_data = (*size > 0) ? ctx->memory.data + *offset : nullptr,
             .input_size = *size,
-            .value = bytes32_from_uint256(value),
-            .create2_salt = bytes32_from_uint256(salt_word),
-            .code_address = evmc::address{},
+            .value = static_cast<evmc::bytes32>(store_be_as<bytes32_t>(value)),
+            .create2_salt =
+                static_cast<evmc::bytes32>(store_be_as<bytes32_t>(salt_word)),
+            .code_address = {},
             .memory_handle = ctx->memory.data_handle,
             .memory = ctx->memory.data + ctx->memory.size,
             .memory_capacity = ctx->memory.capacity - ctx->memory.size,
@@ -129,7 +135,7 @@ namespace monad::vm::runtime
     void create(
         Context *ctx, uint256_t *result_ptr, uint256_t const *value_ptr,
         uint256_t const *offset_ptr, uint256_t const *size_ptr,
-        std::int64_t remaining_block_base_gas)
+        int64_t const remaining_block_base_gas)
     {
         *result_ptr = create_impl<traits>(
             ctx,
@@ -147,7 +153,7 @@ namespace monad::vm::runtime
     void create2(
         Context *ctx, uint256_t *result_ptr, uint256_t const *value_ptr,
         uint256_t const *offset_ptr, uint256_t const *size_ptr,
-        uint256_t const *salt_ptr, std::int64_t remaining_block_base_gas)
+        uint256_t const *salt_ptr, int64_t const remaining_block_base_gas)
     {
         *result_ptr = create_impl<traits>(
             ctx,

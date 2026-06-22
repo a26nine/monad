@@ -13,18 +13,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include <category/core/assert.h>
+#include <category/core/cases.hpp>
 #include <category/core/runtime/uint256.hpp>
-#include <category/vm/core/assert.h>
-#include <category/vm/core/cases.hpp>
 #include <category/vm/evm/opcodes.hpp>
+#include <category/vm/evm/revision.h>
 #include <category/vm/evm/traits.hpp>
 #include <category/vm/utils/evm-as.hpp>
 #include <category/vm/utils/evm-as/builder.hpp>
 #include <category/vm/utils/evm-as/compiler.hpp>
 #include <category/vm/utils/evm-as/validator.hpp>
 #include <category/vm/utils/parser.hpp>
-
-#include <evmc/evmc.h>
 
 #include <algorithm>
 #include <array>
@@ -115,7 +114,7 @@ namespace monad::vm::utils
         return input;
     }
 
-    void err(std::string_view msg, std::string_view value)
+    void err(std::string_view const msg, std::string_view const value)
     {
         std::cerr << "error: " << msg << ": " << value << '\n';
         exit(1);
@@ -126,20 +125,20 @@ namespace monad::vm::utils
         std::cerr << "error: " << err.msg << std::endl;
     }
 
-    std::pair<char const *, std::variant<runtime::uint256_t, std::string>>
+    std::pair<char const *, std::variant<uint256_t, std::string>>
     parse_constant_or_label(char const *input)
     {
         input = drop_spaces(input);
         auto const *p = try_parse_hex_constant(input);
         if (p != input) {
             auto const s = std::string(input, p);
-            return std::make_pair(p, runtime::uint256_t::from_string(s));
+            return std::make_pair(p, uint256_t::from_string(s));
         }
 
         p = try_parse_decimal_constant(input);
         if (p != input) {
             auto const s = std::string(input, p);
-            return std::make_pair(p, runtime::uint256_t::from_string(s));
+            return std::make_pair(p, uint256_t::from_string(s));
         }
         p = try_parse_label(input);
         if (p == input) {
@@ -161,22 +160,22 @@ namespace monad::vm::utils
         return input;
     }
 
-    bool is_push_with_arg(std::string_view op)
+    bool is_push_with_arg(std::string_view const op)
     {
         return (
             find(push_ops_with_arg.begin(), push_ops_with_arg.end(), op) !=
             push_ops_with_arg.end());
     }
 
-    void warn(std::string_view msg, std::string_view value)
+    void warn(std::string_view const msg, std::string_view const value)
     {
         std::cerr << "warning: " << msg << ": " << value << '\n';
     }
 
-    std::optional<uint8_t> find_opcode(std::string_view op)
+    std::optional<uint8_t> find_opcode(std::string_view const op)
     {
         auto const &tbl = monad::vm::compiler::make_opcode_table<
-            EvmTraits<EVMC_LATEST_STABLE_REVISION>>();
+            EvmTraits<MONAD_ETH_LATEST_STABLE_REVISION>>();
         size_t i;
         for (i = 0; i < tbl.size(); ++i) {
             if (tbl[i].name == op) {
@@ -193,8 +192,8 @@ namespace monad::vm::utils
     {
         std::stringstream ss;
         auto const &tbl = monad::vm::compiler::make_opcode_table<
-            EvmTraits<EVMC_LATEST_STABLE_REVISION>>();
-        for (std::size_t i = 0; i < opcodes.size(); ++i) {
+            EvmTraits<MONAD_ETH_LATEST_STABLE_REVISION>>();
+        for (size_t i = 0; i < opcodes.size(); ++i) {
             auto c = opcodes[i];
             ss << std::format("[{:#x}] {:#x} {}\n", i, c, tbl[opcodes[i]].name);
             if (c >= PUSH1 && c <= PUSH32) {
@@ -209,7 +208,8 @@ namespace monad::vm::utils
 
     std::vector<uint8_t> compile_tokens(
         parser_config const &config,
-        evm_as::EvmBuilder<EvmTraits<EVMC_LATEST_STABLE_REVISION>> const &eb)
+        evm_as::EvmBuilder<EvmTraits<MONAD_ETH_LATEST_STABLE_REVISION>> const
+            &eb)
     {
         std::vector<uint8_t> opcodes{};
         std::vector<evm_as::ValidationError> errors{};
@@ -282,13 +282,13 @@ namespace monad::vm::utils
 
                     std::visit(
                         Cases{
-                            [&](runtime::uint256_t const &imm) -> void {
+                            [&](uint256_t const &imm) -> void {
                                 auto const *const pushops =
                                     push_ops_with_arg.data();
                                 auto const d = std::distance(
                                     pushops,
                                     std::find(pushops, pushops + 33, op));
-                                MONAD_VM_ASSERT(d >= 0);
+                                MONAD_ASSERT(d >= 0);
                                 size_t const n = static_cast<size_t>(d);
                                 if (n == 0) {
                                     eb.push0();

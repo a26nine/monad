@@ -13,13 +13,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include <category/core/address.hpp>
+#include <category/core/assert.h>
 #include <category/core/bytes.hpp>
 #include <category/core/config.hpp>
 #include <category/core/int.hpp>
 #include <category/core/likely.h>
 #include <category/core/result.hpp>
-#include <category/execution/ethereum/core/account.hpp>
-#include <category/execution/ethereum/core/address.hpp>
+#include <category/execution/ethereum/core/contract/checked_math.hpp>
 #include <category/execution/ethereum/core/transaction.hpp>
 #include <category/execution/ethereum/state3/state.hpp>
 #include <category/execution/ethereum/validate_transaction.hpp>
@@ -30,12 +31,8 @@
 
 #include <evmc/evmc.h>
 
-#include <intx/intx.hpp>
-
 #include <boost/outcome/config.hpp>
 #include <boost/outcome/success_failure.hpp>
-
-#include <silkpre/secp256k1n.hpp>
 
 #include <cstdint>
 #include <initializer_list>
@@ -51,11 +48,10 @@ Result<void> static_validate_transaction(
     Transaction const &tx, std::optional<uint256_t> const &base_fee_per_gas,
     std::optional<uint64_t> const &excess_blob_gas, uint256_t const &chain_id)
 {
+    static_assert(traits::evm_rev() >= MONAD_ETH_SPURIOUS_DRAGON);
+
     // EIP-155
     if (MONAD_LIKELY(tx.sc.chain_id.has_value())) {
-        if constexpr (traits::evm_rev() < EVMC_SPURIOUS_DRAGON) {
-            return TransactionError::TypeNotSupported;
-        }
         if (MONAD_UNLIKELY(tx.sc.chain_id.value() != chain_id)) {
             return TransactionError::WrongChainId;
         }
@@ -70,20 +66,20 @@ Result<void> static_validate_transaction(
 
     // TODO: remove the below logic once we fully migrate over to traits
     // EIP-2930 & EIP-2718
-    if constexpr (traits::evm_rev() < EVMC_BERLIN) {
+    if constexpr (traits::evm_rev() < MONAD_ETH_BERLIN) {
         if (MONAD_UNLIKELY(tx.type != TransactionType::legacy)) {
             return TransactionError::TypeNotSupported;
         }
     }
     // EIP-1559
-    else if constexpr (traits::evm_rev() < EVMC_LONDON) {
+    else if constexpr (traits::evm_rev() < MONAD_ETH_LONDON) {
         if (MONAD_UNLIKELY(
                 tx.type != TransactionType::legacy &&
                 tx.type != TransactionType::eip2930)) {
             return TransactionError::TypeNotSupported;
         }
     }
-    else if constexpr (traits::evm_rev() < EVMC_CANCUN) {
+    else if constexpr (traits::evm_rev() < MONAD_ETH_CANCUN) {
         if (MONAD_UNLIKELY(
                 tx.type != TransactionType::legacy &&
                 tx.type != TransactionType::eip2930 &&
@@ -91,7 +87,7 @@ Result<void> static_validate_transaction(
             return TransactionError::TypeNotSupported;
         }
     }
-    else if constexpr (traits::evm_rev() < EVMC_PRAGUE) {
+    else if constexpr (traits::evm_rev() < MONAD_ETH_PRAGUE) {
         if (MONAD_UNLIKELY(
                 tx.type != TransactionType::legacy &&
                 tx.type != TransactionType::eip2930 &&
@@ -120,7 +116,7 @@ Result<void> static_validate_transaction(
     }
 
     // EIP-3860
-    if constexpr (traits::evm_rev() >= EVMC_SHANGHAI) {
+    if constexpr (traits::evm_rev() >= MONAD_ETH_SHANGHAI) {
         // In `MONAD_TWO`, the maximum code size for contracts was increased
         // without explicitly changing every corresponding check on initcode
         // size. This meant that in some places, the maximum initcode size was
@@ -143,7 +139,7 @@ Result<void> static_validate_transaction(
         return TransactionError::IntrinsicGasGreaterThanLimit;
     }
 
-    if constexpr (traits::evm_rev() >= EVMC_PRAGUE) {
+    if constexpr (traits::evm_rev() >= MONAD_ETH_PRAGUE) {
         // EIP-7623
         if (MONAD_UNLIKELY(floor_data_gas(tx) > tx.gas_limit)) {
             return TransactionError::IntrinsicGasGreaterThanLimit;
@@ -162,20 +158,18 @@ Result<void> static_validate_transaction(
         return TransactionError::NonceExceedsMax;
     }
 
-    // EIP-1559
+    // EIP-1559: check gas_limit * max_fee_per_gas doesn't overflow uint256
     if (MONAD_UNLIKELY(
-            max_gas_cost(tx.gas_limit, tx.max_fee_per_gas) >
-            std::numeric_limits<uint256_t>::max())) {
+            !checked_mul(uint256_t{tx.gas_limit}, tx.max_fee_per_gas))) {
         return TransactionError::GasLimitOverflow;
     }
 
     // EIP-2
-    if (MONAD_UNLIKELY(!silkpre::is_valid_signature(
-            tx.sc.r, tx.sc.s, traits::evm_rev() >= EVMC_HOMESTEAD))) {
+    if (MONAD_UNLIKELY(!tx.sc.is_valid())) {
         return TransactionError::InvalidSignature;
     }
 
-    if constexpr (traits::evm_rev() >= EVMC_CANCUN) {
+    if constexpr (traits::evm_rev() >= MONAD_ETH_CANCUN) {
         if (tx.type == TransactionType::eip4844) {
             if (MONAD_UNLIKELY(tx.blob_versioned_hashes.empty())) {
                 return TransactionError::InvalidBlobHash;
@@ -190,7 +184,8 @@ Result<void> static_validate_transaction(
 
             if (MONAD_UNLIKELY(
                     tx.max_fee_per_blob_gas <
-                    get_base_fee_per_blob_gas(excess_blob_gas.value()))) {
+                    get_base_fee_per_blob_gas<traits>(
+                        excess_blob_gas.value_or(0)))) {
                 return TransactionError::GasLimitOverflow;
             }
         }
@@ -205,10 +200,12 @@ template <Traits traits>
 Result<void> validate_transaction(
     Transaction const &tx, Address const &sender, State &state,
     uint256_t const & /*base_fee_per_gas*/,
-    std::span<std::optional<Address> const> const /*authorities*/)
+    std::span<std::optional<Address> const> const /*authorities*/,
+    trace::StateTracer &state_tracer)
 {
     static_assert(is_evm_trait_v<traits>);
-    return validate_ethereum_transaction<traits>(tx, sender, state);
+    return validate_ethereum_transaction<traits>(
+        tx, sender, state, state_tracer);
 }
 
 EXPLICIT_EVM_TRAITS(validate_transaction);

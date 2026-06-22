@@ -13,14 +13,20 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include <category/core/address.hpp>
 #include <category/core/assert.h>
 #include <category/core/config.hpp>
 #include <category/core/keccak.hpp>
-#include <category/core/unaligned.hpp>
-#include <category/execution/ethereum/core/address.hpp>
+#include <category/core/log.hpp>
+#include <category/core/runtime/unaligned.hpp>
 #include <category/execution/ethereum/core/rlp/block_rlp.hpp>
+#include <category/execution/ethereum/db/test/commit_simple.hpp>
 #include <category/execution/ethereum/db/trie_db.hpp>
 #include <category/execution/ethereum/state2/state_deltas.hpp>
+#include <category/mpt/db_metadata_context.hpp>
+#include <category/mpt/detail/timeline.hpp>
+#include <category/mpt/state_machine_kind.hpp>
+#include <category/mpt/trie.hpp>
 #include <category/statesync/statesync_client.h>
 #include <category/statesync/statesync_client_context.hpp>
 #include <category/statesync/statesync_messages.h>
@@ -29,7 +35,6 @@
 #include <category/statesync/statesync_version.h>
 
 #include <ankerl/unordered_dense.h>
-#include <quill/Quill.h>
 
 #include <cstdint>
 #include <deque>
@@ -99,6 +104,19 @@ void statesync_server_send_done(
     monad_statesync_server_network *const net, monad_sync_done const done)
 {
     monad_statesync_client_handle_done(net->cctx, done);
+}
+
+namespace monad::mpt::test
+{
+    // Friend-of-Db accessor (db.hpp friends monad::mpt::test::DbAccessor).
+    // Lets the fresh-pool helper stamp the persisted state_machine_kind.
+    struct DbAccessor
+    {
+        static UpdateAux &aux(Db &db)
+        {
+            return const_cast<UpdateAux &>(db.aux());
+        }
+    };
 }
 
 MONAD_NAMESPACE_BEGIN
@@ -248,10 +266,13 @@ namespace
             ::ftruncate(fd, static_cast<off_t>(8ULL * 1024 * 1024 * 1024)));
         ::close(fd);
         char const *const path = dbname.c_str();
-        OnDiskMachine machine;
-        mpt::Db const db{
-            machine,
+        mpt::Db db{
+            std::make_unique<OnDiskMachine>(),
             mpt::OnDiskDbConfig{.append = false, .dbname_paths = {path}}};
+        monad::mpt::test::DbAccessor::aux(db)
+            .metadata_ctx()
+            .set_state_machine_kind(
+                timeline_id::primary, state_machine_kind::ethereum);
         return dbname;
     }
 
@@ -279,9 +300,9 @@ LLVMFuzzerTestOneInput(uint8_t const *const data, size_t const size)
             &client,
             &statesync_send_request);
     std::filesystem::path sdbname{tmp_dbname()};
-    OnDiskMachine machine;
     mpt::Db sdb{
-        machine, OnDiskDbConfig{.append = true, .dbname_paths = {sdbname}}};
+        std::make_unique<OnDiskMachine>(),
+        OnDiskDbConfig{.append = true, .dbname_paths = {sdbname}}};
     TrieDb stdb{sdb};
     std::unique_ptr<monad_statesync_server_context> sctx =
         std::make_unique<monad_statesync_server_context>(stdb);
@@ -309,7 +330,8 @@ LLVMFuzzerTestOneInput(uint8_t const *const data, size_t const size)
 
     // write the genesis block
     {
-        sctx->commit(StateDeltas{}, Code{}, NULL_HASH_BLAKE3, hdr);
+        monad::test::commit_simple(
+            *sctx, monad::test::sd({}), Code{}, NULL_HASH_BLAKE3, hdr);
         sctx->finalize(0, NULL_HASH_BLAKE3);
         auto const rlp = rlp::encode_block_header(sctx->read_eth_header());
         parent_hash = to_bytes(keccak256(rlp));
@@ -351,7 +373,8 @@ LLVMFuzzerTestOneInput(uint8_t const *const data, size_t const size)
         hdr.parent_hash = parent_hash;
         bytes32_t const curr_block_id = bytes32_t{hdr.number};
         sctx->set_block_and_prefix(hdr.number - 1);
-        sctx->commit(deltas, {}, curr_block_id, hdr);
+        monad::test::commit_simple(
+            *sctx, monad::test::sd(std::move(deltas)), {}, curr_block_id, hdr);
         sctx->finalize(hdr.number, curr_block_id);
         auto const rlp = rlp::encode_block_header(sctx->read_eth_header());
         parent_hash = to_bytes(keccak256(rlp));
@@ -362,7 +385,7 @@ LLVMFuzzerTestOneInput(uint8_t const *const data, size_t const size)
             monad_statesync_server_run_once(server);
         }
     }
-    quill::flush();
+    flush_logger();
     MONAD_ASSERT(monad_statesync_client_has_reached_target(cctx));
     MONAD_ASSERT(monad_statesync_client_finalize(cctx));
 

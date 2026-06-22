@@ -18,19 +18,22 @@
 
 #include <category/core/assert.h>
 #include <category/core/byte_string.hpp>
+#include <category/core/keccak.h>
+#include <category/core/test_util/gtest_signal_stacktrace_printer.hpp> // NOLINT
+#include <category/mpt/detail/timeline.hpp>
 #include <category/mpt/node.hpp>
 #include <category/mpt/traverse.hpp>
 #include <category/mpt/trie.hpp>
 #include <category/mpt/update.hpp>
-#include <category/mpt/util.hpp>
-
-#include <category/core/test_util/gtest_signal_stacktrace_printer.hpp> // NOLINT
 
 #include <algorithm>
-#include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <memory>
+#include <optional>
 #include <stack>
 #include <utility>
+#include <vector>
 
 using namespace ::monad;
 using namespace ::monad::mpt;
@@ -52,9 +55,9 @@ TEST_F(OnDiskMerkleTrieGTest, recursively_verify_versions)
         std::stack<ExpectedSubtrieVersion> &records;
         bool done_erase{false};
 
-        TraverseVerifyVersions(
+        explicit TraverseVerifyVersions(
             std::stack<ExpectedSubtrieVersion> &records,
-            bool done_erase_ = false)
+            bool const done_erase_ = false)
             : records(records)
             , done_erase{done_erase_}
         {
@@ -148,7 +151,14 @@ TEST_F(OnDiskMerkleTrieGTest, recursively_verify_versions)
             i++;
         }
         this->root = this->aux.do_update(
-            std::move(this->root), *this->sm, std::move(updates), block_id);
+            std::move(this->root),
+            *this->sm,
+            std::move(updates),
+            block_id,
+            /*compaction=*/false,
+            /*can_write_to_fast=*/true,
+            /*write_root=*/true,
+            timeline_id::primary);
     }
 
     {
@@ -161,7 +171,7 @@ TEST_F(OnDiskMerkleTrieGTest, recursively_verify_versions)
             this->aux,
             *this->root,
             traverse,
-            this->aux.db_history_max_version());
+            this->aux.metadata_ctx().db_history_max_version());
         EXPECT_EQ(traverse.records.empty(), true);
     }
 
@@ -169,7 +179,7 @@ TEST_F(OnDiskMerkleTrieGTest, recursively_verify_versions)
     // A full traversal to verify versions are correct
     constexpr unsigned ERASE_BATCH_SIZE = BATCH_SIZE / 2;
     for (uint64_t new_id = 0; new_id < NUM_BLOCKS; ++new_id) {
-        uint64_t block_id = new_id + NUM_BLOCKS;
+        uint64_t const block_id = new_id + NUM_BLOCKS;
         std::vector<byte_string> key_values;
         key_values.reserve(ERASE_BATCH_SIZE);
         std::vector<Update> updates_alloc;
@@ -191,7 +201,14 @@ TEST_F(OnDiskMerkleTrieGTest, recursively_verify_versions)
             i++;
         }
         this->root = this->aux.do_update(
-            std::move(this->root), *this->sm, std::move(updates), block_id);
+            std::move(this->root),
+            *this->sm,
+            std::move(updates),
+            block_id,
+            /*compaction=*/false,
+            /*can_write_to_fast=*/true,
+            /*write_root=*/true,
+            timeline_id::primary);
     }
 
     {
@@ -204,7 +221,7 @@ TEST_F(OnDiskMerkleTrieGTest, recursively_verify_versions)
             this->aux,
             *this->root,
             traverse,
-            this->aux.db_history_max_version());
+            this->aux.metadata_ctx().db_history_max_version());
         EXPECT_EQ(traverse.records.empty(), true);
     }
 }

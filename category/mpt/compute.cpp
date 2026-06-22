@@ -21,7 +21,6 @@
 #include <category/core/rlp/encode.hpp>
 #include <category/mpt/config.hpp>
 #include <category/mpt/merkle/compact_encode.hpp>
-#include <category/mpt/merkle/node_reference.hpp>
 #include <category/mpt/nibbles_view.hpp>
 #include <category/mpt/node.hpp>
 
@@ -31,15 +30,14 @@
 
 MONAD_MPT_NAMESPACE_BEGIN
 
-unsigned encode_two_pieces(
-    unsigned char *const dest, NibblesView const path,
-    byte_string_view const second, bool const has_value)
+byte_string encode_two_pieces(
+    NibblesView const path, byte_string_view const second, bool const has_value)
 {
     constexpr size_t max_compact_encode_size = KECCAK256_SIZE + 1;
 
     MONAD_ASSERT(path.data_size() <= KECCAK256_SIZE);
 
-    unsigned char path_arr[max_compact_encode_size];
+    unsigned char path_arr[max_compact_encode_size] = {0};
     auto const first = compact_encode(path_arr, path, has_value);
     MONAD_ASSERT(first.size() <= max_compact_encode_size);
     // leaf and hashed node ref requires rlp encoding,
@@ -60,12 +58,11 @@ unsigned encode_two_pieces(
 
     byte_string rlp(rlp::list_length(concat_len), 0);
     rlp::encode_list(rlp, {concat_rlp.data(), concat_rlp.size()});
-    auto ret = to_node_reference({rlp.data(), rlp.size()}, dest);
-    // free any long array allocated on heap
-    return ret;
+    return rlp;
 }
 
-std::span<unsigned char> encode_empty_string(std::span<unsigned char> result)
+std::span<unsigned char>
+encode_empty_string(std::span<unsigned char> const result)
 {
     result[0] = RLP_EMPTY_STRING;
     return result.subspan(1);

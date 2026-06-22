@@ -13,17 +13,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include <category/core/address.hpp>
 #include <category/core/assert.h>
+#include <category/core/bytes.hpp>
 #include <category/core/config.hpp>
-#include <category/core/cpu_relax.h>
-#include <category/core/event/event_recorder.h>
 #include <category/core/fiber/fiber_group.hpp>
 #include <category/core/fiber/priority_pool.hpp>
 #include <category/core/int.hpp>
 #include <category/core/likely.h>
+#include <category/core/monad_exception.hpp>
 #include <category/core/result.hpp>
 #include <category/execution/ethereum/block_hash_buffer.hpp>
-#include <category/execution/ethereum/block_hash_history.hpp>
 #include <category/execution/ethereum/block_reward.hpp>
 #include <category/execution/ethereum/chain/chain.hpp>
 #include <category/execution/ethereum/core/block.hpp>
@@ -31,39 +31,42 @@
 #include <category/execution/ethereum/core/receipt.hpp>
 #include <category/execution/ethereum/core/transaction.hpp>
 #include <category/execution/ethereum/core/withdrawal.hpp>
-#include <category/execution/ethereum/dao.hpp>
 #include <category/execution/ethereum/dispatch_transaction.hpp>
 #include <category/execution/ethereum/event/exec_event_ctypes.h>
 #include <category/execution/ethereum/event/exec_event_recorder.hpp>
 #include <category/execution/ethereum/event/record_txn_events.hpp>
 #include <category/execution/ethereum/execute_block.hpp>
+#include <category/execution/ethereum/execute_block_header.hpp>
 #include <category/execution/ethereum/execute_transaction.hpp>
 #include <category/execution/ethereum/metrics/block_metrics.hpp>
+#include <category/execution/ethereum/process_requests.hpp>
 #include <category/execution/ethereum/state2/block_state.hpp>
 #include <category/execution/ethereum/state3/state.hpp>
 #include <category/execution/ethereum/trace/call_tracer.hpp>
 #include <category/execution/ethereum/trace/event_trace.hpp>
+#include <category/execution/ethereum/trace/state_tracer.hpp>
 #include <category/execution/ethereum/validate_block.hpp>
-#include <category/execution/monad/staking/execute_block_prelude.hpp>
 #include <category/vm/evm/explicit_traits.hpp>
-#include <category/vm/evm/switch_traits.hpp>
 #include <category/vm/evm/traits.hpp>
 
 #include <boost/fiber/future/promise.hpp>
 #include <boost/outcome/try.hpp>
 #include <evmc/evmc.h>
-#include <intx/intx.hpp>
+#include <evmc/evmc.hpp>
 
-#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
 MONAD_ANONYMOUS_NAMESPACE_BEGIN
+
+using namespace monad::literals;
 
 // EIP-4895
 void process_withdrawal(
@@ -75,35 +78,6 @@ void process_withdrawal(
                 withdrawal.recipient,
                 uint256_t{withdrawal.amount} * uint256_t{1'000'000'000u});
         }
-    }
-}
-
-void transfer_balance_dao(State &state)
-{
-    for (auto const &addr : dao::child_accounts) {
-        uint256_t const balance = state.get_balance(addr);
-        state.add_to_balance(dao::withdraw_account, balance);
-        state.subtract_from_balance(addr, balance);
-    }
-}
-
-// EIP-4788
-void set_beacon_root(State &state, BlockHeader const &header)
-{
-    constexpr auto BEACON_ROOTS_ADDRESS{
-        0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02_address};
-    constexpr uint256_t HISTORY_BUFFER_LENGTH{8191};
-
-    if (state.account_exists(BEACON_ROOTS_ADDRESS)) {
-        uint256_t timestamp{header.timestamp};
-        bytes32_t k1{
-            to_bytes(to_big_endian(timestamp % HISTORY_BUFFER_LENGTH))};
-        bytes32_t k2{to_bytes(to_big_endian(
-            timestamp % HISTORY_BUFFER_LENGTH + HISTORY_BUFFER_LENGTH))};
-        state.set_storage(
-            BEACON_ROOTS_ADDRESS, k1, to_bytes(to_big_endian(timestamp)));
-        state.set_storage(
-            BEACON_ROOTS_ADDRESS, k2, header.parent_beacon_block_root.value());
     }
 }
 
@@ -177,40 +151,6 @@ std::vector<std::vector<std::optional<Address>>> recover_authorities(
 }
 
 template <Traits traits>
-void execute_block_header(
-    Chain const &chain, BlockState &block_state, BlockHeader const &header)
-{
-    State state{block_state, Incarnation{header.number, 0}};
-
-    deploy_block_hash_history_contract<traits>(state);
-    set_block_hash_history<traits>(state, header);
-
-    if constexpr (traits::evm_rev() >= EVMC_CANCUN) {
-        set_beacon_root(state, header);
-    }
-
-    // Ethereum mainnet dao fork
-    if constexpr (traits::evm_rev() == EVMC_HOMESTEAD) {
-        if (MONAD_UNLIKELY(header.number == dao::dao_block_number)) {
-            if (chain.get_chain_id() == 1) {
-                transfer_balance_dao(state);
-            }
-        }
-    }
-
-    // TODO: move to execute_monad_block eventually
-    if constexpr (is_monad_trait_v<traits>) {
-        staking::execute_block_prelude<traits>(state);
-    }
-
-    MONAD_ASSERT(block_state.can_merge(state));
-    block_state.merge(state);
-    record_account_access_events(MONAD_ACCT_ACCESS_BLOCK_PROLOGUE, state);
-}
-
-EXPLICIT_TRAITS(execute_block_header);
-
-template <Traits traits>
 Result<std::vector<Receipt>> execute_block_transactions(
     Chain const &chain, BlockHeader const &header,
     std::span<Transaction const> const transactions,
@@ -220,7 +160,7 @@ Result<std::vector<Receipt>> execute_block_transactions(
     fiber::FiberGroup &priority_pool, BlockMetrics &block_metrics,
     std::span<std::unique_ptr<CallTracerBase>> const call_tracers,
     std::span<std::unique_ptr<trace::StateTracer>> const state_tracers,
-    ChainContext<traits> const &chain_ctx)
+    ChainContext<traits> const &chain_ctx, bool const trace_transfers)
 {
     MONAD_ASSERT(senders.size() == transactions.size());
     MONAD_ASSERT(senders.size() == call_tracers.size());
@@ -251,7 +191,8 @@ Result<std::vector<Receipt>> execute_block_transactions(
              &block_metrics,
              &call_tracer = *call_tracers[i],
              &state_tracer = *state_tracers[i],
-             &chain_ctx = chain_ctx] {
+             &chain_ctx = chain_ctx,
+             trace_transfers = trace_transfers] {
                 record_txn_marker_event(MONAD_EXEC_TXN_PERF_EVM_ENTER, i);
                 try {
                     results[i] = dispatch_transaction<traits>(
@@ -267,7 +208,8 @@ Result<std::vector<Receipt>> execute_block_transactions(
                         promises[i],
                         call_tracer,
                         state_tracer,
-                        chain_ctx);
+                        chain_ctx,
+                        trace_transfers);
                     if (results[i]->has_error()) {
                         record_txn_error_event(i, results[i]->error());
                     }
@@ -282,7 +224,7 @@ Result<std::vector<Receipt>> execute_block_transactions(
             });
     }
 
-    auto const last = static_cast<std::ptrdiff_t>(transactions.size());
+    auto const last = static_cast<ptrdiff_t>(transactions.size());
     promises[last].get_future().get();
     block_metrics.tx_exec_time =
         std::chrono::duration_cast<std::chrono::microseconds>(
@@ -290,7 +232,8 @@ Result<std::vector<Receipt>> execute_block_transactions(
 
     std::vector<Receipt> retvals;
     for (unsigned i = 0; i < transactions.size(); ++i) {
-        MONAD_ASSERT(results[i].has_value());
+        MONAD_ASSERT_THROW(
+            results[i].has_value(), "missing transaction result");
         if (MONAD_UNLIKELY(results[i].value().has_error())) {
             LOG_ERROR(
                 "tx {} {} validation failed: {}",
@@ -321,15 +264,18 @@ Result<std::vector<Receipt>> execute_block(
     fiber::FiberGroup &priority_pool, BlockMetrics &block_metrics,
     std::span<std::unique_ptr<CallTracerBase>> const call_tracers,
     std::span<std::unique_ptr<trace::StateTracer>> const state_tracers,
-    ChainContext<traits> const &chain_ctx)
+    trace::StateTracer &system_call_state_tracer,
+    ChainContext<traits> const &chain_ctx, bool const trace_transfers)
 {
+    static_assert(traits::evm_rev() >= MONAD_ETH_SPURIOUS_DRAGON);
+
     TRACE_BLOCK_EVENT(StartBlock);
 
     MONAD_ASSERT(senders.size() == block.transactions.size());
     MONAD_ASSERT(senders.size() == call_tracers.size());
     MONAD_ASSERT(senders.size() == state_tracers.size());
 
-    execute_block_header<traits>(chain, block_state, block.header);
+    execute_block_header<traits>(block_state, block.header);
 
     BOOST_OUTCOME_TRY(
         auto const retvals,
@@ -345,20 +291,37 @@ Result<std::vector<Receipt>> execute_block(
             block_metrics,
             call_tracers,
             state_tracers,
-            chain_ctx));
+            chain_ctx,
+            trace_transfers));
 
     State state{
         block_state, Incarnation{block.header.number, Incarnation::LAST_TX}};
 
-    if constexpr (traits::evm_rev() >= EVMC_SHANGHAI) {
+    if constexpr (traits::evm_rev() >= MONAD_ETH_SHANGHAI) {
         process_withdrawal(state, block.withdrawals);
+    }
+
+    if constexpr (traits::eip_7685_active()) {
+        BOOST_OUTCOME_TRY(
+            auto const computed_requests_hash,
+            process_requests<traits>(
+                chain,
+                state,
+                block_hash_buffer,
+                block.header,
+                system_call_state_tracer,
+                chain_ctx,
+                retvals));
+        MONAD_ASSERT(block.header.requests_hash.has_value());
+        if (MONAD_UNLIKELY(
+                computed_requests_hash != block.header.requests_hash.value())) {
+            return BlockError::InvalidRequestsHash;
+        }
     }
 
     apply_block_reward<traits>(state, block);
 
-    if constexpr (traits::evm_rev() >= EVMC_SPURIOUS_DRAGON) {
-        state.destruct_touched_dead();
-    }
+    state.destruct_touched_dead();
 
     MONAD_ASSERT(block_state.can_merge(state));
     block_state.merge(state);

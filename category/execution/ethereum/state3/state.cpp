@@ -15,6 +15,7 @@
 
 #include <category/execution/ethereum/state3/state.hpp>
 
+#include <category/core/address.hpp>
 #include <category/core/assert.h>
 #include <category/core/byte_string.hpp>
 #include <category/core/bytes.hpp>
@@ -24,7 +25,6 @@
 #include <category/core/likely.h>
 #include <category/core/monad_exception.hpp>
 #include <category/execution/ethereum/core/account.hpp>
-#include <category/execution/ethereum/core/address.hpp>
 #include <category/execution/ethereum/core/receipt.hpp>
 #include <category/execution/ethereum/state2/block_state.hpp>
 #include <category/execution/ethereum/state3/account_state.hpp>
@@ -36,8 +36,6 @@
 #include <category/vm/vm.hpp>
 
 #include <evmc/evmc.h>
-
-#include <intx/intx.hpp>
 
 #include <immer/vector.hpp>
 
@@ -117,6 +115,14 @@ State::Map<Address, VersionStack<AccountState>> const &State::current() const
 State::Map<bytes32_t, vm::SharedVarcode> const &State::code() const
 {
     return code_;
+}
+
+State::Set<Address> const &State::current_frame_dirty_accounts() const
+{
+    MONAD_ASSERT(version_);
+    MONAD_ASSERT(dirty_.size() == version_);
+
+    return dirty_.back();
 }
 
 void State::push()
@@ -312,8 +318,8 @@ State::get_transient_storage(Address const &address, bytes32_t const &key)
 
 bool State::is_touched(Address const &address)
 {
-    auto const &account_state = recent_account_state(address);
-    return account_state.is_touched();
+    auto const it = current_.find(address);
+    return it != current_.end() && it->second.recent().is_touched();
 }
 
 void State::set_nonce(Address const &address, uint64_t const nonce)
@@ -406,11 +412,26 @@ evmc_access_status State::access_account(Address const &address)
     return account_state.access();
 }
 
+template <Traits traits>
 evmc_access_status
 State::access_storage(Address const &address, bytes32_t const &key)
 {
     auto &account_state = current_account_state(address);
-    return account_state.access_storage(key);
+    auto const slot_status = account_state.access_storage(key);
+    if constexpr (traits::mip_8_active()) {
+        return account_state.page_tracker_.access_page(key);
+    }
+    return slot_status;
+}
+
+EXPLICIT_TRAITS_MEMBER(State::access_storage);
+
+vm::Host::PageStorageStatus State::update_page(
+    Address const &address, bytes32_t const &key,
+    evmc_storage_status const status)
+{
+    auto &account_state = current_account_state(address);
+    return account_state.page_tracker_.update_page(key, status);
 }
 
 template <Traits traits>
@@ -420,7 +441,7 @@ State::selfdestruct(Address const &address, Address const &beneficiary)
     auto &account_state = current_account_state(address);
     uint256_t const balance = get_balance(address);
 
-    if constexpr (traits::evm_rev() < EVMC_CANCUN) {
+    if constexpr (traits::evm_rev() < MONAD_ETH_CANCUN) {
         if (address != beneficiary) {
             add_to_balance(beneficiary, balance);
         }
@@ -456,7 +477,7 @@ void State::destruct_suicides()
         auto &account_state = stack.current(0);
         if (account_state.is_destructed()) {
             auto &account = account_state.account_;
-            if constexpr (traits::evm_rev() < EVMC_CANCUN) {
+            if constexpr (traits::evm_rev() < MONAD_ETH_CANCUN) {
                 account.reset();
             }
             else {
@@ -538,26 +559,9 @@ size_t State::copy_code(
     if (MONAD_UNLIKELY(!account.has_value())) {
         return 0;
     }
-    bytes32_t const &code_hash = account.value().code_hash;
-    vm::SharedVarcode vcode{};
-    {
-        auto const it = code_.find(code_hash);
-        if (it != code_.end()) {
-            vcode = it->second;
-        }
-        else {
-            vcode = block_state_.read_code(code_hash);
-        }
-    }
+    vm::SharedVarcode const vcode = read_code(account.value().code_hash);
     MONAD_ASSERT(vcode);
-    auto const &icode = vcode->intercode();
-    auto const code_size = icode->size();
-    if (offset > code_size) {
-        return 0;
-    }
-    auto const n = std::min(code_size - offset, buffer_size);
-    std::copy_n(icode->code() + offset, n, buffer);
-    return n;
+    return vcode->intercode()->copy_code(offset, buffer, buffer_size);
 }
 
 void State::set_code(Address const &address, byte_string_view const code)

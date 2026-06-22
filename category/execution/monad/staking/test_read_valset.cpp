@@ -13,22 +13,32 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#include <category/async/config.hpp>
 #include <category/async/util.hpp>
+#include <category/core/assert.h>
+#include <category/core/bytes.hpp>
+#include <category/core/int.hpp>
+#include <category/core/runtime/uint256.hpp>
 #include <category/execution/ethereum/core/contract/big_endian.hpp>
+#include <category/execution/ethereum/db/test/commit_simple.hpp>
+#include <category/execution/ethereum/db/trie_db.hpp>
 #include <category/execution/ethereum/db/util.hpp>
 #include <category/execution/ethereum/state2/block_state.hpp>
-#include <category/execution/ethereum/state2/state_deltas.hpp>
 #include <category/execution/ethereum/state3/state.hpp>
+#include <category/execution/ethereum/trace/call_tracer.hpp>
 #include <category/execution/monad/staking/read_valset.hpp>
 #include <category/execution/monad/staking/staking_contract.hpp>
+#include <category/execution/monad/staking/util/constants.hpp>
+#include <category/vm/vm.hpp>
+
+#include <category/mpt/db.hpp>
 #include <category/mpt/ondisk_db_config.hpp>
-
-#include <test_resource_data.h>
-
-#include <optional>
-#include <utility>
+#include <unistd.h>
 
 #include <gtest/gtest.h>
+
+#include <cstdint>
+#include <optional>
 
 using namespace monad;
 using namespace monad::staking;
@@ -78,10 +88,10 @@ protected:
     void SetUp() override
     {
         {
-            OnDiskMachine machine;
             vm::VM vm;
             mpt::Db db{
-                machine, mpt::OnDiskDbConfig{.dbname_paths = {db_file.path}}};
+                std::make_unique<OnDiskMachine>(),
+                mpt::OnDiskDbConfig{.dbname_paths = {db_file.path}}};
             TrieDb tdb{db};
             BlockState bs{tdb, vm};
             State state{bs, Incarnation{0, 0}};
@@ -109,15 +119,13 @@ protected:
 
             MONAD_ASSERT(bs.can_merge(state));
             bs.merge(state);
-            bs.commit(
+            auto [state_deltas, code, _] = std::move(bs).release();
+            test::commit_simple(
+                tdb,
+                std::move(state_deltas),
+                code,
                 NULL_HASH_BLAKE3,
-                BlockHeader{.number = TEST_BLOCK_NUM},
-                {},
-                {},
-                {},
-                {},
-                {},
-                {});
+                BlockHeader{.number = TEST_BLOCK_NUM});
             tdb.finalize(TEST_BLOCK_NUM, NULL_HASH_BLAKE3);
         }
         io_ctx.emplace(
@@ -142,7 +150,7 @@ TEST_F(ReadValsetBeforeBoundary, get_this_epoch_valset)
     ASSERT_TRUE(set.has_value());
     EXPECT_EQ(set.value().size(), CONSENSUS_VALSET_LENGTH);
     for (auto const &validator : set.value()) {
-        EXPECT_EQ(intx::be::load<uint256_t>(validator.stake), CONSENSUS_STAKE);
+        EXPECT_EQ(load_be<uint256_t>(validator.stake), CONSENSUS_STAKE);
     }
 }
 
@@ -180,7 +188,7 @@ TEST_F(ReadValsetAfterBoundary, get_this_epoch_valset)
     ASSERT_TRUE(set.has_value());
     EXPECT_EQ(set.value().size(), SNAPSHOT_VALSET_LENGTH);
     for (auto const &validator : set.value()) {
-        EXPECT_EQ(intx::be::load<uint256_t>(validator.stake), SNAPSHOT_STAKE);
+        EXPECT_EQ(load_be<uint256_t>(validator.stake), SNAPSHOT_STAKE);
     }
 }
 
@@ -192,7 +200,7 @@ TEST_F(ReadValsetAfterBoundary, get_next_epoch_valset)
     ASSERT_TRUE(set.has_value());
     EXPECT_EQ(set.value().size(), CONSENSUS_VALSET_LENGTH);
     for (auto const &validator : set.value()) {
-        EXPECT_EQ(intx::be::load<uint256_t>(validator.stake), CONSENSUS_STAKE);
+        EXPECT_EQ(load_be<uint256_t>(validator.stake), CONSENSUS_STAKE);
     }
 }
 
